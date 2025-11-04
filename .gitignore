@@ -1,0 +1,17 @@
+# Ignore Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# VS Code settings
+.vscode/
+
+# Virtual environments
+venv/
+.env/
+
+# History files
+.history/
+
+.DS_Store
