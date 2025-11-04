@@ -105,8 +105,8 @@ for SUBJ in "${SUBJECTS[@]}"; do
             echo "→ Processing: $VIDEO"
 
             # Extract subject/session folder names
-            SUBJ_DIR_NAME=$(basename "$(dirname "$(dirname "$VIDEO")")")
-            SESS_DIR_NAME=$(basename "$(dirname "$(dirname "$(dirname "$VIDEO")")")")
+            SUBJ_DIR_NAME=$(basename "$(dirname "$(dirname "$(dirname "$(dirname "$(dirname "$VIDEO")")")")")") 
+            SESS_DIR_NAME=$(basename "$(dirname "$(dirname "$(dirname "$(dirname "$VIDEO")")")")")
 
             OUTPUT_DIR="${BASE_DIR}/derivatives/${SUBJ_DIR_NAME}/${SESS_DIR_NAME}/saved_analysis_results"
             mkdir -p "$OUTPUT_DIR"
