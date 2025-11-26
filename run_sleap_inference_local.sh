@@ -6,7 +6,7 @@ conda activate sleap
 # run_sleap_inference_local.sh
 #
 # Usage examples:
-#   bash run_sleap_inference_local.sh -s 038 -d 20251029
+#   bash run_sleap_inference_local.sh -s 038 -d 20251119
 #   bash run_sleap_inference_local.sh -s 038 039 -d 20251029 20251030
 #   bash run_sleap_inference_local.sh -s 038 -d 20251029 -m /custom/model/path -b /custom/base
 #
