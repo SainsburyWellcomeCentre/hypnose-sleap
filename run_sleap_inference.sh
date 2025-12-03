@@ -53,8 +53,10 @@ echo "DEBUG: Raw subjects before padding: ${SUBJECTS[@]}"
 echo "DEBUG: Raw dates: ${DATES[@]}"
 
 # Pad subject IDs with leading zeros (e.g., 40 -> 040)
+# Remove any leading zeros first to avoid octal interpretation
 for i in "${!SUBJECTS[@]}"; do
-    SUBJECTS[$i]=$(printf "%03d" "${SUBJECTS[$i]}")
+    # Remove leading zeros, then pad to 3 digits
+    SUBJECTS[$i]=$(printf "%03d" "$((10#${SUBJECTS[$i]}))")
 done
 
 echo "DEBUG: Padded subjects: ${SUBJECTS[@]}"
