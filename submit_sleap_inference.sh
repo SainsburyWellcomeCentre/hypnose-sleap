@@ -13,7 +13,7 @@ if [[ ! -f "$INFERENCE_SCRIPT" ]]; then
 fi
 
 # Parse email
-EMAIL="${USER}@ucl.ac.uk"
+EMAIL="joschua.geuter.22@ucl.ac.uk"
 
 # Create temporary SLURM script
 SLURM_SCRIPT=$(mktemp /tmp/slurm_sleap_XXXXXX.sh)
