@@ -112,7 +112,7 @@ for VIDEO in "${VIDEOS_TO_PROCESS[@]}"; do
     
     echo "[${VIDEO_COUNT}/${#VIDEOS_TO_PROCESS[@]}] Processing: $VIDEO"
     
-    if sleap-track "$VIDEO" -m "$MODEL" --gpu auto -o "$OUTPUT_FILE" --verbosity json --no-empty-frames 2>&1; then
+    if sleap-track "$VIDEO" -m "$MODEL" --gpu auto -o "$OUTPUT_FILE" --verbosity json --no-empty-frames --batch-size 1 --peak-threshold 0.5 2>&1; then
         echo "  ✓ Completed"
         SUCCESSFUL_VIDEOS+=("$VIDEO")
     else

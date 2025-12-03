@@ -25,3 +25,13 @@ Adjust Base Directory and Model Path to your directory
 run_sleap_inference_local -s XXX -d YYYYMMDD 
 
 --> can run inference for multiple subjids and dates
+
+## For HPC: 
+
+Clone repo on the HPC. Make scripts executable using:
+    chmod +x run_sleap_inference.sh
+    chmod +x submit_sleap_inference.sh
+
+Submit job: 
+    - cd into the sleap-hypnose folder containing the scripts
+    - run: ./submit_sleap_inference.sh -s 40 -d 20251128 -m ./models/251031_100645.single_instance.n=160

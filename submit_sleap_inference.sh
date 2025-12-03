@@ -21,14 +21,14 @@ SLURM_SCRIPT=$(mktemp /tmp/slurm_sleap_XXXXXX.sh)
 cat > "$SLURM_SCRIPT" << 'SLURM_EOF'
 #!/bin/bash
 
-#SBATCH -p gpu
+#SBATCH -p a100
 #SBATCH -N 1
-#SBATCH --mem 64G
-#SBATCH -n 4
+#SBATCH --mem 128G
+#SBATCH -n 8
 #SBATCH -t 0-12:00
-#SBATCH --gres gpu:1
-#SBATCH -o slurm.%N.%j.out
-#SBATCH -e slurm.%N.%j.err
+#SBATCH --gres gpu:a100:1
+#SBATCH -o ../hpc_output/slurm.%N.%j.out
+#SBATCH -e ../hpc_output/slurm.%N.%j.err
 #SBATCH --mail-type=END,FAIL
 SLURM_EOF
 
