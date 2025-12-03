@@ -57,17 +57,24 @@ for SUBJ in "${SUBJECTS[@]}"; do
     for DATE in "${DATES[@]}"; do
         SEARCH_PATH="${BASE_DIR}/rawdata/sub-${SUBJ}_*"
         
+        echo "DEBUG: Searching for subject pattern: $SEARCH_PATH"
+        
         for SUBJ_DIR in $SEARCH_PATH; do
             [[ ! -d "$SUBJ_DIR" ]] && continue
+            echo "DEBUG: Found subject dir: $SUBJ_DIR"
             
             SESSION_DIR=$(find "$SUBJ_DIR" -maxdepth 1 -type d -name "ses-*_date-${DATE}" 2>/dev/null | head -1)
-            [[ -z "$SESSION_DIR" ]] && continue
+            [[ -z "$SESSION_DIR" ]] && echo "DEBUG: No session found for date $DATE" && continue
+            echo "DEBUG: Found session dir: $SESSION_DIR"
             
             BEHAV_DIR="$SESSION_DIR/behav"
-            [[ ! -d "$BEHAV_DIR" ]] && continue
+            [[ ! -d "$BEHAV_DIR" ]] && echo "DEBUG: Behav dir not found: $BEHAV_DIR" && continue
+            echo "DEBUG: Found behav dir: $BEHAV_DIR"
             
+            echo "DEBUG: Searching for timestamp dirs matching: $BEHAV_DIR/*T*"
             for TS_DIR in "$BEHAV_DIR"/*T*; do
                 [[ ! -d "$TS_DIR" ]] && continue
+                echo "DEBUG: Found timestamp dir: $TS_DIR"
                 
                 VIDEO_DIR="$TS_DIR/VideoData"
                 [[ ! -d "$VIDEO_DIR" ]] && continue
