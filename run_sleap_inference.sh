@@ -49,6 +49,11 @@ if [[ ! -d "$MODEL" ]]; then
     exit 1
 fi
 
+# Pad subject IDs with leading zeros (e.g., 40 -> 040)
+for i in "${!SUBJECTS[@]}"; do
+    SUBJECTS[$i]=$(printf "%03d" "${SUBJECTS[$i]}")
+done
+
 declare -a VIDEOS_TO_PROCESS
 FAILED_VIDEOS=()
 SUCCESSFUL_VIDEOS=()
