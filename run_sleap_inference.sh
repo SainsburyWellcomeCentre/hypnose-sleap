@@ -49,10 +49,15 @@ if [[ ! -d "$MODEL" ]]; then
     exit 1
 fi
 
+echo "DEBUG: Raw subjects before padding: ${SUBJECTS[@]}"
+echo "DEBUG: Raw dates: ${DATES[@]}"
+
 # Pad subject IDs with leading zeros (e.g., 40 -> 040)
 for i in "${!SUBJECTS[@]}"; do
     SUBJECTS[$i]=$(printf "%03d" "${SUBJECTS[$i]}")
 done
+
+echo "DEBUG: Padded subjects: ${SUBJECTS[@]}"
 
 declare -a VIDEOS_TO_PROCESS
 FAILED_VIDEOS=()
