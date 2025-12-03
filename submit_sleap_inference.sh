@@ -40,11 +40,14 @@ cat >> "$SLURM_SCRIPT" << 'SLURM_EOF'
 module load cuda/11.8
 module load SLEAP/2024-08-14
 
+# Decode arguments from base64
+ARGS_DECODED=$(echo "$ARGS_B64" | base64 -d)
+
 # Change to script directory
 cd "SCRIPT_DIR_PLACEHOLDER"
 
-# Run inference with all arguments
-bash run_sleap_inference.sh "${ARGS[@]}"
+# Run inference with decoded arguments
+bash run_sleap_inference.sh $ARGS_DECODED
 exit $?
 SLURM_EOF
 
@@ -57,15 +60,15 @@ fi
 
 chmod +x "$SLURM_SCRIPT"
 
-# Store arguments
-ARGS=("$@")
+# Store arguments as base64 to preserve spaces and special characters
+ARGS_B64=$(printf '%s\n' "$@" | base64 -w0)
 
 # Submit job with arguments
 echo "Submitting SLURM job..."
 echo "Arguments: $@"
 echo ""
 
-JOB_ID=$(sbatch --export=ARGS="$(printf '%q ' "${ARGS[@]}")" "$SLURM_SCRIPT" | awk '{print $4}')
+JOB_ID=$(sbatch --export=ARGS_B64="$ARGS_B64" "$SLURM_SCRIPT" | awk '{print $4}')
 
 if [[ -z "$JOB_ID" ]]; then
     echo "Error: Failed to submit job"
