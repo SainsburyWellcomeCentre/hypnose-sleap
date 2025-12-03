@@ -66,7 +66,7 @@ for SUBJ in "${SUBJECTS[@]}"; do
             BEHAV_DIR="$SESSION_DIR/behav"
             [[ ! -d "$BEHAV_DIR" ]] && continue
             
-            for TS_DIR in "$BEHAV_DIR"/????-??-??-T??-??-??; do
+            for TS_DIR in "$BEHAV_DIR"/*T*; do
                 [[ ! -d "$TS_DIR" ]] && continue
                 
                 VIDEO_DIR="$TS_DIR/VideoData"
