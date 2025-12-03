@@ -23,7 +23,7 @@ cat > "$SLURM_SCRIPT" << 'SLURM_EOF'
 
 #SBATCH -p gpu
 #SBATCH -N 1
-#SBATCH --mem 32G
+#SBATCH --mem 64G
 #SBATCH -n 4
 #SBATCH -t 0-12:00
 #SBATCH --gres gpu:1
@@ -37,8 +37,8 @@ echo "#SBATCH --mail-user=${EMAIL}" >> "$SLURM_SCRIPT"
 cat >> "$SLURM_SCRIPT" << 'SLURM_EOF'
 
 # Load required modules
-module load cuda/12.1
-module load SLEAP/2025-09-30
+module load cuda/11.8
+module load SLEAP/2024-08-14
 
 # Change to script directory
 cd "SCRIPT_DIR_PLACEHOLDER"
