@@ -24,7 +24,35 @@ Adjust Base Directory and Model Path to your directory
 
 run_sleap_inference_local -s XXX -d YYYYMMDD 
 
---> can run inference for multiple subjids and dates
+For Windows: 
+In GitBash Terminal run: $ bash run_sleap_inference_local_windows.sh -s XX -b E: -bz 64
+
+### Defaults
+- Model: `C:/Users/HarrisLab/Desktop/Repos/sleap-models/sleap_v1.5.5_new_model/models/run_trial2_251205_181823.single_instance.n=150`
+- Base data root: `Z:/hypnose`
+- Derivatives root: `${BASE_DIR}/derivatives`
+- Batch size: `64`
+- Video glob: `*.avi`
+- If `BASE_DIR` is the default and `E:/rawdata` exists, it automatically switches to `E:/` to use a local copy.
+
+
+### Arguments
+- `-s, --subject <SUBJ ...>`: One or more subject IDs (e.g., `40` or `038`). Padding to three digits is handled internally.
+- `-d, --date <DATE|DATE_RANGE ...>`: Zero or more dates. Accepts `YYYYMMDD` or ranges `YYYYMMDD-YYYYMMDD` (inclusive). If omitted, the script discovers all dates present for each subject under `<BASE_DIR>/rawdata/sub-XXX_*`.
+- `-m, --model <PATH>`: Override model path.
+- `-b, --base-dir <PATH>`: Override base data root (expects `rawdata/...`).
+- `-bz, --batch-size <N>`: Override batch size for `sleap-track`.
+
+### Usage Examples
+- Single subject/date with defaults:
+    - `bash run_sleap_inference_local_windows.sh -s 038 -d 20251119`
+- Multiple subjects and dates:
+    - `bash run_sleap_inference_local_windows.sh -s 038 039 -d 20251029 20251030`
+- Date range and custom model/base:
+    - `bash run_sleap_inference_local_windows.sh -s 040 -d 20251101-20251105 -m D:/models/custom.slp -b E:`
+- Custom batch size:
+    - `bash run_sleap_inference_local_windows.sh -s 040 -d 20251125 -bz 32`
+
 
 ## For HPC: 
 
