@@ -646,10 +646,21 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
         return None
     
     # Load fonts
-    try:
-        font_large = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 40)
-        font_small = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 24)
-    except Exception:
+    # Try common Windows fonts first; fall back to macOS, then default.
+    font_large = None
+    font_small = None
+    for font_path in [
+        "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/ARIAL.TTF",
+        "/System/Library/Fonts/Helvetica.ttc",
+    ]:
+        try:
+            font_large = ImageFont.truetype(font_path, 80)
+            font_small = ImageFont.truetype(font_path, 40)
+            break
+        except Exception:
+            continue
+    if font_large is None or font_small is None:
         font_large = ImageFont.load_default()
         font_small = ImageFont.load_default()
     
@@ -764,26 +775,40 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
                                  cx + centroid_radius, cy + centroid_radius],
                                 fill=centroid_color, outline=centroid_color)
 
-                # Odor overlay near poke port (top-center in unrotated coordinates)
+                # Odor overlay (text only, neon red); hidden when no odor
+                odor_label = None
                 if row is not None and valve_events:
                     frame_time = pd.to_datetime(row.get('time')) if 'time' in row else None
                     odor_label = lookup_odor(frame_time.to_datetime64() if frame_time is not None else None)
-                else:
-                    odor_label = None
 
-                odor_text = f"Odor: {odor_label}" if odor_label else "Odor: none"
-                # Anchor in unrotated coords then rotate anchor point
-                anchor_x_raw = width // 2
-                anchor_y_raw = 30
-                anchor_x, anchor_y = rotate_point(anchor_x_raw, anchor_y_raw, width, height, rotate_deg)
-                bbox = draw.textbbox((0, 0), odor_text, font=font_small)
-                box_w = bbox[2] - bbox[0]
-                box_h = bbox[3] - bbox[1]
-                pad = 8
-                draw.rectangle([anchor_x - box_w // 2 - pad, anchor_y - pad,
-                               anchor_x + box_w // 2 + pad, anchor_y + box_h + pad],
-                              fill='black', outline='white', width=2)
-                draw.text((anchor_x - box_w // 2, anchor_y), odor_text, fill='white', font=font_small)
+                if odor_label:
+                    odor_text = f"Odor: {odor_label}"
+                    # Anchor in unrotated coords then rotate anchor point (keep existing position)
+                    anchor_x_raw = width // 2
+                    anchor_y_raw = 30
+                    anchor_x, anchor_y = rotate_point(anchor_x_raw, anchor_y_raw, width, height, rotate_deg)
+                    draw.text((anchor_x, anchor_y), odor_text, fill=(255, 40, 90), font=font_small)
+
+                # Reward overlays (text only, green) near bottom corners
+                reward_text = "Reward"
+                reward_color = (0, 220, 0)
+                x_offset = 140  # pull toward center
+                y_offset = 5    # bind very close to bottom edge
+
+                bbox_reward = draw.textbbox((0, 0), reward_text, font=font_small)
+                text_h = bbox_reward[3] - bbox_reward[1]
+
+                # Bottom-left
+                bl_x_raw = x_offset
+                bl_y_raw = height - y_offset - text_h
+                bl_x, bl_y = rotate_point(bl_x_raw, bl_y_raw, width, height, rotate_deg)
+                draw.text((bl_x, bl_y), reward_text, fill=reward_color, font=font_small)
+
+                # Bottom-right
+                br_x_raw = width - (x_offset + 230)
+                br_y_raw = height - y_offset - text_h
+                br_x, br_y = rotate_point(br_x_raw, br_y_raw, width, height, rotate_deg)
+                draw.text((br_x, br_y), reward_text, fill=reward_color, font=font_small)
 
                 # Convert back to BGR for OpenCV
                 frame_annotated = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
