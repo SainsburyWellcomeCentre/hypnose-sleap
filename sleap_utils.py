@@ -41,10 +41,22 @@ def sleap_labels_and_centroid(subjid, date, base_dir=None, core_nodes=None):
         return []
 
     def extract_points_and_scores(inst, n_nodes):
+        """Extract x,y coordinates and confidence scores from instance."""
         pts_raw = None
-        if hasattr(inst, "points_array") and inst.points_array is not None:
+        
+        # Try to get numpy array first (most reliable for PredictedPointsArray)
+        if hasattr(inst, "numpy") and callable(inst.numpy):
+            try:
+                pts_raw = inst.numpy()  # Returns (n_nodes, 2) array of [x, y]
+            except Exception:
+                pass
+        
+        # Fallback to points_array
+        if pts_raw is None and hasattr(inst, "points_array") and inst.points_array is not None:
             pts_raw = inst.points_array
-        elif hasattr(inst, "points") and inst.points is not None:
+        
+        # Fallback to points
+        if pts_raw is None and hasattr(inst, "points") and inst.points is not None:
             pts_raw = inst.points
 
         if pts_raw is None:
@@ -59,26 +71,34 @@ def sleap_labels_and_centroid(subjid, date, base_dir=None, core_nodes=None):
         def as_xy(point):
             if point is None:
                 return (nan, nan)
+            # Handle numpy arrays directly (from numpy() method)
+            if hasattr(point, "__len__") and len(point) == 2 and isinstance(point[0], (int, float, np.integer, np.floating)):
+                return (float(point[0]), float(point[1]))
             if hasattr(point, "x") and hasattr(point, "y"):
                 return (point.x, point.y)
             if isinstance(point, dict):
                 if "xy" in point and point["xy"] is not None:
                     return (point["xy"][0], point["xy"][1])
                 return (point.get("x", nan), point.get("y", nan))
-            if hasattr(point, "__len__") and len(point) >= 2:
-                return (point[0], point[1])
             return (nan, nan)
 
         xy = []
         for idx in range(n_nodes):
             xy.append(as_xy(pts_seq[idx] if idx < len(pts_seq) else None))
 
+        # Extract confidence scores from PredictedPointsArray
         scores = None
-        if hasattr(inst, "point_confidences") and inst.point_confidences is not None:
+        if hasattr(inst, "points") and hasattr(inst.points, "__len__"):
+            # For PredictedPointsArray, confidence is in element [1]
+            try:
+                scores = [inst.points[idx][1] if idx < len(inst.points) else nan for idx in range(n_nodes)]
+            except Exception:
+                pass
+        
+        # Fallback to point_confidences attribute
+        if scores is None and hasattr(inst, "point_confidences") and inst.point_confidences is not None:
             scores_raw = inst.point_confidences
             scores = [scores_raw[idx] if idx < len(scores_raw) else nan for idx in range(n_nodes)]
-        elif pts_seq and isinstance(pts_seq[0], dict) and "score" in pts_seq[0]:
-            scores = [pts_seq[idx].get("score", nan) if idx < len(pts_seq) else nan for idx in range(n_nodes)]
 
         return xy, scores
 
