@@ -1,35 +1,209 @@
-import sys
-import os
-from pathlib import Path
-
-
-def _discover_project_root() -> str:
-    env_override = os.environ.get("HYPNOSE_PROJECT_ROOT")
-    if env_override:
-        return os.path.abspath(env_override)
-
-    current = Path(__file__).resolve().parent
-    for candidate in [current] + list(current.parents):
-        if (candidate / "data" / "rawdata").exists():
-            return str(candidate)
-    return os.path.abspath("")
-
-
-project_root = _discover_project_root()
-if project_root not in sys.path:
-    sys.path.append(project_root)
-
+import sleap_io
 import pandas as pd
-import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
-from matplotlib import cm
-from typing import Iterable, Optional, Union
-from utils.metrics_utils import load_session_results, run_all_metrics, parse_json_column
-from datetime import timedelta, datetime
-from utils.classification_utils import load_all_streams, load_experiment
-import re
 import numpy as np
+from pathlib import Path
 import json
+from hypnose_analysis.paths import get_derivatives_root, get_data_root
+from hypnose_analysis.utils.classification_utils import load_all_streams
+from hypnose_analysis.utils.metrics_utils import load_session_results
+
+def sleap_labels_and_centroid(subjid, date, base_dir=None, core_nodes=None):
+    """
+    Load all .slp files for a subject/date, flatten every frame/instance to CSV,
+    and append per-frame centroids from available core nodes.
+    Returns a list of saved CSV paths.
+    """
+
+    nan = float("nan")
+
+    def resolve_deriv_root():
+        if base_dir:
+            candidate = Path(base_dir).expanduser().resolve()
+            if candidate.name != "derivatives" and (candidate / "derivatives").exists():
+                return (candidate / "derivatives").resolve()
+            return candidate
+        return get_derivatives_root()
+
+    def node_names_for_instance(inst, default_nodes):
+        if getattr(inst, "skeleton", None):
+            return [node.name for node in inst.skeleton.nodes]
+
+        pts = getattr(inst, "points", None)
+        if isinstance(pts, list) and pts and isinstance(pts[0], dict) and "name" in pts[0]:
+            return [pt["name"] for pt in pts]
+
+        if default_nodes:
+            return default_nodes
+
+        if pts is not None:
+            return [f"node_{idx}" for idx in range(len(pts))]
+
+        return []
+
+    def extract_points_and_scores(inst, n_nodes):
+        pts_raw = None
+        if hasattr(inst, "points_array") and inst.points_array is not None:
+            pts_raw = inst.points_array
+        elif hasattr(inst, "points") and inst.points is not None:
+            pts_raw = inst.points
+
+        if pts_raw is None:
+            pts_seq = []
+        elif isinstance(pts_raw, list):
+            pts_seq = pts_raw
+        elif hasattr(pts_raw, "tolist"):
+            pts_seq = pts_raw.tolist()
+        else:
+            pts_seq = list(pts_raw)
+
+        def as_xy(point):
+            if point is None:
+                return (nan, nan)
+            if hasattr(point, "x") and hasattr(point, "y"):
+                return (point.x, point.y)
+            if isinstance(point, dict):
+                if "xy" in point and point["xy"] is not None:
+                    return (point["xy"][0], point["xy"][1])
+                return (point.get("x", nan), point.get("y", nan))
+            if hasattr(point, "__len__") and len(point) >= 2:
+                return (point[0], point[1])
+            return (nan, nan)
+
+        xy = []
+        for idx in range(n_nodes):
+            xy.append(as_xy(pts_seq[idx] if idx < len(pts_seq) else None))
+
+        scores = None
+        if hasattr(inst, "point_confidences") and inst.point_confidences is not None:
+            scores_raw = inst.point_confidences
+            scores = [scores_raw[idx] if idx < len(scores_raw) else nan for idx in range(n_nodes)]
+        elif pts_seq and isinstance(pts_seq[0], dict) and "score" in pts_seq[0]:
+            scores = [pts_seq[idx].get("score", nan) if idx < len(pts_seq) else nan for idx in range(n_nodes)]
+
+        return xy, scores
+
+    def to_number(val):
+        if val is None:
+            return nan
+        if isinstance(val, (float, int)):
+            return val
+        if hasattr(val, "item"):
+            try:
+                return val.item()
+            except Exception:
+                pass
+        if hasattr(val, "__len__") and len(val) > 0:
+            first = val[0]
+            if isinstance(first, (float, int)):
+                return first
+            if hasattr(first, "item"):
+                try:
+                    return first.item()
+                except Exception:
+                    return nan
+            return nan
+        try:
+            return float(val)
+        except Exception:
+            return nan
+
+    core_nodes = core_nodes or [
+        "right_ear",
+        "left_ear",
+        "center_head",
+        "neck",
+        "center",
+        "center_back",
+        "tail_base",
+    ]
+
+    deriv_dir = resolve_deriv_root()
+    if not deriv_dir.exists():
+        raise FileNotFoundError(f"Derivatives directory not found: {deriv_dir}")
+
+    sub_str = f"sub-{str(subjid).zfill(3)}"
+    date_str = str(date)
+
+    subject_dirs = sorted(deriv_dir.glob(f"{sub_str}_id-*"))
+    if not subject_dirs:
+        raise FileNotFoundError(f"No subject directory found for {sub_str} under {deriv_dir}")
+    subject_dir = subject_dirs[0]
+
+    session_dirs = sorted(subject_dir.glob(f"ses-*_date-{date_str}"))
+    if not session_dirs:
+        raise FileNotFoundError(f"No session found for date {date_str} in {subject_dir}")
+    session_dir = session_dirs[0]
+
+    results_dir = session_dir / "saved_analysis_results"
+    if not results_dir.exists():
+        raise FileNotFoundError(f"Results directory not found: {results_dir}")
+
+    slp_files = sorted(results_dir.glob("*.slp"))
+    if not slp_files:
+        raise FileNotFoundError(f"No .slp files found in {results_dir}")
+
+    print(f"Found {len(slp_files)} video(s) to process:")
+    for i, f in enumerate(slp_files, 1):
+        print(f"  {i}. {f.name}")
+
+    default_nodes = []
+
+    outputs = []
+    for video_number, slp_path in enumerate(slp_files, 1):
+        output_path = results_dir / f"sleap_tracking_video{video_number}.csv"
+        print(f"\n[{video_number}/{len(slp_files)}] Processing: {slp_path.name}")
+
+        labels = sleap_io.load_slp(str(slp_path))
+        if getattr(labels, "skeletons", None):
+            default_nodes = [node.name for node in labels.skeletons[0].nodes]
+
+        rows = []
+        for lf in getattr(labels, "labeled_frames", []):
+            frame_idx = getattr(lf, "frame_idx", getattr(lf, "frame", pd.NA))
+            for inst_idx, inst in enumerate(getattr(lf, "instances", [])):
+                node_names = node_names_for_instance(inst, default_nodes)
+                if not node_names:
+                    continue
+                xy, scores = extract_points_and_scores(inst, len(node_names))
+
+                row = {"frame": frame_idx, "instance": inst_idx}
+                track = getattr(inst, "track", None)
+                if track is not None:
+                    row["track"] = getattr(track, "name", None) or getattr(track, "id", None) or str(track)
+
+                for node_name, (x, y) in zip(node_names, xy):
+                    row[f"{node_name}_x"] = to_number(x)
+                    row[f"{node_name}_y"] = to_number(y)
+                if scores is not None:
+                    for node_name, score in zip(node_names, scores):
+                        row[f"{node_name}_score"] = to_number(score)
+
+                rows.append(row)
+
+        df = pd.DataFrame(rows)
+        if df.empty:
+            raise ValueError(f"No pose data found in {slp_path}")
+
+        df = df[pd.notna(df["frame"])]
+        df.sort_values(["frame", "instance"], inplace=True)
+        df.reset_index(drop=True, inplace=True)
+
+        centroid_x_cols = [f"{node}_x" for node in core_nodes if f"{node}_x" in df.columns]
+        centroid_y_cols = [f"{node}_y" for node in core_nodes if f"{node}_y" in df.columns]
+
+        df["centroid_x"] = df[centroid_x_cols].mean(axis=1, skipna=True) if centroid_x_cols else pd.NA
+        df["centroid_y"] = df[centroid_y_cols].mean(axis=1, skipna=True) if centroid_y_cols else pd.NA
+
+        df.to_csv(output_path, index=False)
+
+        outputs.append(output_path)
+        print(f"  ✓ Saved to: {output_path.name}")
+        print(f"    Total rows: {len(df)}")
+        print(f"    Frame range: {int(df['frame'].min())} to {int(df['frame'].max())}")
+
+    print("\n✅ All videos processed!")
+    return outputs
+
 
 def get_video_frame_times(root, verbose=True):
     """
@@ -79,6 +253,7 @@ def get_video_frame_times(root, verbose=True):
     
     return result
 
+
 def add_timestamps_to_sleap_tracking(subjid, date, save_output=True):
     """
     Add synchronized timestamps to all SLEAP tracking CSVs for a session.
@@ -104,7 +279,7 @@ def add_timestamps_to_sleap_tracking(subjid, date, save_output=True):
     import re
     
     # Build path to derivatives directory
-    base_path = Path(project_root) / "data" / "rawdata"
+    base_path = get_data_root() / "rawdata"
     derivatives_dir = base_path.resolve().parent / "derivatives"
     
     # Find subject and session directories
@@ -164,13 +339,16 @@ def add_timestamps_to_sleap_tracking(subjid, date, save_output=True):
     
     # Step 3: Combine and sort all video frame times
     combined_frame_times = pd.concat(all_frame_times, ignore_index=True)
+    combined_frame_times['time'] = pd.to_datetime(combined_frame_times['time'], errors='coerce')
+    combined_frame_times['local_frame'] = pd.to_numeric(combined_frame_times['local_frame'], errors='coerce').astype('Int64')
     combined_frame_times = combined_frame_times.sort_values('time').reset_index(drop=True)
-    combined_frame_times['global_frame'] = range(len(combined_frame_times))
+    combined_frame_times['global_frame'] = pd.Series(range(len(combined_frame_times)), dtype='Int64')
     
     print(f"Total: {len(combined_frame_times):,} frames from {combined_frame_times['video_file'].nunique()} video file(s)")
     
     # Get unique video files in order
     video_files_ordered = combined_frame_times['video_file'].unique()
+    frames_by_video = {vf: df.copy() for vf, df in combined_frame_times.groupby('video_file')}
     print(f"\nVideo files in order:")
     for i, vf in enumerate(video_files_ordered):
         print(f"  {i+1}. {vf}")
@@ -209,7 +387,7 @@ def add_timestamps_to_sleap_tracking(subjid, date, save_output=True):
             tracking_df = pd.read_csv(csv_path, encoding='latin1')
         
         # Get frame times for this specific video
-        video_frames = combined_frame_times[combined_frame_times['video_file'] == video_file].copy()
+        video_frames = frames_by_video.get(video_file, pd.DataFrame()).copy()
         if video_frames.empty:
             print(f"Warning: Video '{video_file}' not found in frame times, skipping {csv_path.name}")
             continue
@@ -266,6 +444,7 @@ def add_timestamps_to_sleap_tracking(subjid, date, save_output=True):
     return combined
 
 
+
 def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_suffix="sleap_visualization", 
                                           centroid_radius=8, centroid_color='red', show_fps_counter=True,
                                           show_timestamp=True, show_trial_state=True):
@@ -285,7 +464,7 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
     date : int or str
         Session date (e.g., 20251029)
     base_dir : str or Path, optional
-        Base data directory (default: /Volumes/harris/hypnose)
+        Base data directory (default: get_data_root())
     output_suffix : str, optional
         Suffix for output files (default: "sleap_visualization")
     centroid_radius : int, optional
@@ -309,9 +488,9 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
     from PIL import Image, ImageDraw, ImageFont
     from tqdm import tqdm
     
-    # Default base directory
+    # Default base directory (use configured data root if none supplied)
     if base_dir is None:
-        base_dir = Path("/Volumes/harris/hypnose")
+        base_dir = get_data_root()
     else:
         base_dir = Path(base_dir)
     
