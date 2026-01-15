@@ -4,7 +4,7 @@ import numpy as np
 from pathlib import Path
 import json
 from hypnose_analysis.paths import get_derivatives_root, get_data_root
-from hypnose_analysis.utils.classification_utils import load_all_streams
+from hypnose_analysis.utils.classification_utils import load_all_streams, load_odor_mapping
 from hypnose_analysis.utils.metrics_utils import load_session_results
 
 def sleap_labels_and_centroid(subjid, date, base_dir=None, core_nodes=None):
@@ -594,36 +594,56 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
     combined_df = pd.read_csv(combined_ts_file[0])
     print(f"Loaded combined timestamps: {len(combined_df)} frames")
     
-    # Get odor/valve timings if present
-    odor_df = behavior.get('valve_timings', pd.DataFrame()) if behavior else pd.DataFrame()
-    odor_label_col = None
-    if not odor_df.empty:
-        odor_df = odor_df.copy()
-        # Identify odor column
-        if 'odor_id' in odor_df.columns:
-            odor_label_col = 'odor_id'
-        elif 'odor' in odor_df.columns:
-            odor_label_col = 'odor'
-        # Normalize times
-        for col in ['start_time', 'end_time']:
-            if col in odor_df.columns:
-                odor_df[col] = pd.to_datetime(odor_df[col])
-        odor_df = odor_df.dropna(subset=['start_time', 'end_time'])
-        odor_df = odor_df.sort_values('start_time')
-        starts = odor_df['start_time'].to_numpy()
-        ends = odor_df['end_time'].to_numpy()
-        odors = odor_df[odor_label_col].astype(str).to_numpy() if odor_label_col else None
+    # Get odor/valve timings directly from raw streams with real timestamps
+    valve_events: list[dict] = []
+    try:
+        # Pick the first experiment root from the first video path (behav/<exp>/VideoData)
+        sample_video = next(iter(sorted((base_dir / "rawdata").glob(f"sub-{subjid:03d}_*/ses-*_date-{date}/behav/*/VideoData/*.avi"))))
+        exp_root = sample_video.parent.parent  # .../behav/<exp>
 
-        def lookup_odor(ts):
-            idx = np.searchsorted(starts, ts, side='right') - 1
-            if idx >= 0 and ts <= ends[idx]:
-                return odors[idx] if odors is not None else "odor"
-            return None
-    else:
-        starts = ends = odors = None
+        streams = load_all_streams(exp_root, apply_corrections=True, verbose=False)
+        odor_map = load_odor_mapping(exp_root, data=streams, verbose=False)
 
-        def lookup_odor(ts):
+        olfactometer_valves = odor_map.get('olfactometer_valves', {}) if odor_map else {}
+        valve_to_odor = odor_map.get('valve_to_odor', {}) if odor_map else {}
+
+        for olf_id, valve_df in (olfactometer_valves or {}).items():
+            if valve_df is None or getattr(valve_df, 'empty', True):
+                continue
+            for valve_idx, valve_col in enumerate(valve_df.columns):
+                valve_key = f"{olf_id}{valve_idx}"
+                odor_name = valve_to_odor.get(valve_key)
+                if not odor_name or str(odor_name).lower() == 'purge':
+                    continue
+                series = valve_df[valve_col].astype(bool)
+                on_edges = series & ~series.shift(1, fill_value=False)
+                off_edges = ~series & series.shift(1, fill_value=False)
+                on_times = list(series.index[on_edges])
+                off_times = list(series.index[off_edges])
+                j = 0
+                for on_time in on_times:
+                    while j < len(off_times) and off_times[j] <= on_time:
+                        j += 1
+                    if j >= len(off_times):
+                        break
+                    valve_events.append({
+                        'start_time': on_time,
+                        'end_time': off_times[j],
+                        'odor_name': str(odor_name)
+                    })
+        valve_events.sort(key=lambda ev: ev['start_time'])
+    except Exception:
+        valve_events = []
+
+    def lookup_odor(ts):
+        if ts is None or not valve_events:
             return None
+        for ev in valve_events:
+            if ev['start_time'] <= ts <= ev['end_time']:
+                return ev['odor_name']
+            if ev['start_time'] > ts:
+                break
+        return None
     
     # Load fonts
     try:
@@ -745,7 +765,7 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
                                 fill=centroid_color, outline=centroid_color)
 
                 # Odor overlay near poke port (top-center in unrotated coordinates)
-                if row is not None and starts is not None:
+                if row is not None and valve_events:
                     frame_time = pd.to_datetime(row.get('time')) if 'time' in row else None
                     odor_label = lookup_odor(frame_time.to_datetime64() if frame_time is not None else None)
                 else:
