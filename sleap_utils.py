@@ -445,17 +445,17 @@ def add_timestamps_to_sleap_tracking(subjid, date, save_output=True):
 
 
 
-def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_suffix="sleap_visualization", 
-                                          centroid_radius=8, centroid_color='red', show_fps_counter=True,
-                                          show_timestamp=True, show_trial_state=True):
+def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_suffix="sleap_visualization",
+                                          centroid_radius=8, centroid_color='red', rotate_deg=0,
+                                          time_window=None):
     """
-    Annotate behavior videos with SLEAP centroid tracking and trial state overlays.
-    
+    Annotate behavior videos with SLEAP centroid tracking and odor overlays.
+
     Creates MP4 videos with:
-    - Red dot at animal centroid position (from SLEAP tracking)
-    - Frame counter (bottom right)
-    - Synchronized timestamp from video metadata (bottom left)
-    - Trial state indicator: "WITHIN TRIAL" (white) or "OUTSIDE TRIAL" (blue)
+    - Red dot at animal centroid position (from SLEAP tracking) on frames that have centroid data
+    - Odor label box near the poke port (top-center in unrotated view), rotated with the video
+    - Optional trimming to a time window
+    - Optional rotation by 90/180/270 degrees (clockwise)
     
     Parameters:
     -----------
@@ -471,12 +471,11 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
         Radius of centroid marker in pixels (default: 8)
     centroid_color : str, optional
         Color of centroid marker (default: 'red')
-    show_fps_counter : bool, optional
-        Show frame counter (default: True)
-    show_timestamp : bool, optional
-        Show synchronized timestamp (default: True)
-    show_trial_state : bool, optional
-        Show trial state overlay (default: True)
+    rotate_deg : int, optional
+        Rotate output video by 0, 90, 180, or 270 degrees clockwise (default: 0)
+    time_window : tuple[str | pd.Timedelta, str | pd.Timedelta] | None, optional
+        If provided, trims the video to [start, end] relative to the first frame timestamp
+        of that video (e.g., ("0:00:00", "0:10:00") for first 10 minutes).
     
     Returns:
     --------
@@ -484,9 +483,43 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
     """
     from pathlib import Path
     import pandas as pd
+    import numpy as np
     import cv2
     from PIL import Image, ImageDraw, ImageFont
     from tqdm import tqdm
+
+    def rotate_point(x, y, w, h, deg):
+        if deg == 0:
+            return x, y
+        if deg == 90:
+            return h - 1 - y, x
+        if deg == 180:
+            return w - 1 - x, h - 1 - y
+        if deg == 270:
+            return y, w - 1 - x
+        raise ValueError("rotate_deg must be one of {0, 90, 180, 270}")
+
+    def rotate_frame(frame_bgr, deg):
+        if deg == 0:
+            return frame_bgr
+        if deg == 90:
+            return cv2.rotate(frame_bgr, cv2.ROTATE_90_CLOCKWISE)
+        if deg == 180:
+            return cv2.rotate(frame_bgr, cv2.ROTATE_180)
+        if deg == 270:
+            return cv2.rotate(frame_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        raise ValueError("rotate_deg must be one of {0, 90, 180, 270}")
+
+    def parse_time_window(window):
+        if window is None:
+            return None
+        if len(window) != 2:
+            raise ValueError("time_window must be a tuple of (start, end)")
+        start_td = pd.to_timedelta(window[0])
+        end_td = pd.to_timedelta(window[1])
+        if end_td < start_td:
+            raise ValueError("time_window end must be >= start")
+        return start_td, end_td
     
     # Default base directory (use configured data root if none supplied)
     if base_dir is None:
@@ -494,7 +527,7 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
     else:
         base_dir = Path(base_dir)
     
-    # Load behavior data for trial state
+    # Load behavior data (used for valve/odor timings if available)
     behavior = load_session_results(subjid, date)
     
     # Find directories
@@ -541,21 +574,42 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
     combined_df = pd.read_csv(combined_ts_file[0])
     print(f"Loaded combined timestamps: {len(combined_df)} frames")
     
-    # Get trial times
-    trials = behavior.get('initiated_sequences', pd.DataFrame())
-    if not trials.empty:
-        trials = trials.copy()
-        trials['sequence_start'] = pd.to_datetime(trials['sequence_start'])
-        trials['sequence_end'] = pd.to_datetime(trials['sequence_end'])
-        print(f"Loaded {len(trials)} trials")
+    # Get odor/valve timings if present
+    odor_df = behavior.get('valve_timings', pd.DataFrame()) if behavior else pd.DataFrame()
+    odor_label_col = None
+    if not odor_df.empty:
+        odor_df = odor_df.copy()
+        # Identify odor column
+        if 'odor_id' in odor_df.columns:
+            odor_label_col = 'odor_id'
+        elif 'odor' in odor_df.columns:
+            odor_label_col = 'odor'
+        # Normalize times
+        for col in ['start_time', 'end_time']:
+            if col in odor_df.columns:
+                odor_df[col] = pd.to_datetime(odor_df[col])
+        odor_df = odor_df.dropna(subset=['start_time', 'end_time'])
+        odor_df = odor_df.sort_values('start_time')
+        starts = odor_df['start_time'].to_numpy()
+        ends = odor_df['end_time'].to_numpy()
+        odors = odor_df[odor_label_col].astype(str).to_numpy() if odor_label_col else None
+
+        def lookup_odor(ts):
+            idx = np.searchsorted(starts, ts, side='right') - 1
+            if idx >= 0 and ts <= ends[idx]:
+                return odors[idx] if odors is not None else "odor"
+            return None
     else:
-        print("⚠️ No trials found - will show OUTSIDE TRIAL for all frames")
+        starts = ends = odors = None
+
+        def lookup_odor(ts):
+            return None
     
     # Load fonts
     try:
         font_large = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 40)
         font_small = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 24)
-    except:
+    except Exception:
         font_large = ImageFont.load_default()
         font_small = ImageFont.load_default()
     
@@ -566,8 +620,8 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
         print(f"\nProcessing video {video_idx}/{len(video_files)}: {video_path.name}")
         
         # Filter combined_df for this video
-        video_name = video_path.stem  # e.g., VideoData_1904-01-02T03-00-00
-        df_video = combined_df[combined_df['video_file'].str.contains(video_name, na=False)].copy()
+        video_name = video_path.name  # exact filename match
+        df_video = combined_df[combined_df['video_file'] == video_name].copy()
         
         if df_video.empty:
             print(f"  ⚠️ No timestamps found for video {video_name}, skipping")
@@ -576,6 +630,25 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
         # Convert time column to datetime
         df_video['time'] = pd.to_datetime(df_video['time'])
         df_video = df_video.reset_index(drop=True)
+
+        # Aggregate per frame (average across instances) to ensure a single centroid per frame
+        df_video = (df_video
+                .groupby('frame', as_index=False)
+                .agg({'centroid_x': 'mean', 'centroid_y': 'mean', 'time': 'first'}))
+
+        # Apply optional time window relative to first frame time
+        window = parse_time_window(time_window)
+        if window:
+            start_abs = df_video['time'].min() + window[0]
+            end_abs = df_video['time'].min() + window[1]
+            df_video = df_video[(df_video['time'] >= start_abs) & (df_video['time'] <= end_abs)].copy()
+            if df_video.empty:
+                print("  ⚠️ No frames in requested time window, skipping video")
+                continue
+            print(f"  Trimmed to window: {window[0]} - {window[1]} ({len(df_video)} frames)")
+        else:
+            start_abs = None
+            end_abs = None
         
         print(f"  Found {len(df_video)} frames with timestamps")
         
@@ -588,92 +661,95 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
         
         print(f"  Video: {width}x{height} @ {fps} fps, {total_frames} frames")
         
+        # Frame mapping by local frame index for fast lookup
+        df_video['frame'] = pd.to_numeric(df_video['frame'], errors='coerce').astype('Int64')
+        df_video = df_video.dropna(subset=['frame'])
+        row_map = df_video.set_index('frame').to_dict('index')
+        valid_frames = sorted(row_map.keys())
+        if not valid_frames:
+            print("  ⚠️ No valid frames with centroid, skipping video")
+            cap.release()
+            continue
+
+        start_frame = int(valid_frames[0])
+        end_frame = int(valid_frames[-1])
+
+        # Seek to start frame
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
+        # Rotation-aware output size
+        if rotate_deg in (90, 270):
+            out_size = (height, width)
+        else:
+            out_size = (width, height)
+
         # Output video writer
         output_path = results_dir / f"{output_suffix}_video{video_idx}.mp4"
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+        out = cv2.VideoWriter(str(output_path), fourcc, fps, out_size)
         output_paths.append(output_path)
         
         print(f"  Saving to: {output_path.name}")
         
         # Use tqdm for progress bar
-        with tqdm(total=total_frames, desc="  Encoding", unit="frames") as pbar:
-            frame_idx = 0
-            while True:
+        frames_to_process = end_frame - start_frame + 1
+
+        with tqdm(total=frames_to_process, desc="  Encoding", unit="frames") as pbar:
+            current_frame = start_frame
+            while current_frame <= end_frame:
                 ret, frame = cap.read()
                 if not ret:
                     break
-                
+
+                # Rotate raw frame first so overlays align post-rotation
+                frame = rotate_frame(frame, rotate_deg)
+
+                # Determine dimensions after rotation
+                frame_h, frame_w = frame.shape[:2]
+
                 # Convert BGR to RGB for PIL
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 frame_pil = Image.fromarray(frame_rgb)
                 draw = ImageDraw.Draw(frame_pil)
-                
-                # Plot centroid if available
-                if show_fps_counter and frame_idx < len(df_video):
-                    row = df_video.iloc[frame_idx]
-                    if not pd.isna(row['centroid_x']) and not pd.isna(row['centroid_y']):
-                        cx = int(row['centroid_x'])
-                        cy = int(row['centroid_y'])
-                        # Draw simple red dot
-                        draw.ellipse([cx - centroid_radius, cy - centroid_radius, 
-                                     cx + centroid_radius, cy + centroid_radius], 
-                                    fill=centroid_color, outline=centroid_color)
-                
-                # Add frame counter in bottom right
-                if show_fps_counter:
-                    counter_text = f"{frame_idx}/{total_frames}"
-                    counter_bbox = draw.textbbox((0, 0), counter_text, font=font_small)
-                    counter_width = counter_bbox[2] - counter_bbox[0]
-                    counter_x = width - counter_width - 20
-                    counter_y = height - 50
-                    draw.rectangle([counter_x - 10, counter_y - 10, counter_x + counter_width + 10, counter_y + 40],
-                                  fill='black', outline='white', width=2)
-                    draw.text((counter_x, counter_y), counter_text, fill='white', font=font_small)
-                
-                # Add timestamp in bottom left from CSV
-                if show_timestamp and frame_idx < len(df_video):
-                    row = df_video.iloc[frame_idx]
-                    frame_time = row['time']
-                    timestamp_text = frame_time.strftime("%H:%M:%S")
-                    
-                    timestamp_bbox = draw.textbbox((0, 0), timestamp_text, font=font_small)
-                    timestamp_width = timestamp_bbox[2] - timestamp_bbox[0]
-                    timestamp_x = 20
-                    timestamp_y = height - 50
-                    draw.rectangle([timestamp_x - 10, timestamp_y - 10, timestamp_x + timestamp_width + 10, timestamp_y + 40],
-                                  fill='black', outline='white', width=2)
-                    draw.text((timestamp_x, timestamp_y), timestamp_text, fill='white', font=font_small)
-                
-                # Determine trial state from timestamps
-                if show_trial_state:
-                    trial_state = "OUTSIDE TRIAL"
-                    trial_color = (100, 100, 255)  # Blue RGB
-                    
-                    if not trials.empty and frame_idx < len(df_video):
-                        row = df_video.iloc[frame_idx]
-                        frame_time = row['time']
-                        
-                        for _, trial in trials.iterrows():
-                            if trial['sequence_start'] <= frame_time <= trial['sequence_end']:
-                                trial_state = "WITHIN TRIAL"
-                                trial_color = (255, 255, 255)  # White RGB
-                                break
-                    
-                    # Add trial state in top center
-                    state_bbox = draw.textbbox((0, 0), trial_state, font=font_large)
-                    state_width = state_bbox[2] - state_bbox[0]
-                    state_x = (width - state_width) // 2
-                    state_y = 20
-                    draw.rectangle([state_x - 15, state_y - 10, state_x + state_width + 15, state_y + 50],
-                                  fill='black', outline=trial_color, width=3)
-                    draw.text((state_x, state_y), trial_state, fill=trial_color, font=font_large)
-                
+
+                row = row_map.get(current_frame)
+
+                # Plot centroid if available for this frame
+                if row is not None and not pd.isna(row.get('centroid_x')) and not pd.isna(row.get('centroid_y')):
+                    cx_raw = row['centroid_x']
+                    cy_raw = row['centroid_y']
+                    cx_rot, cy_rot = rotate_point(cx_raw, cy_raw, width, height, rotate_deg)
+                    cx, cy = int(cx_rot), int(cy_rot)
+                    draw.ellipse([cx - centroid_radius, cy - centroid_radius,
+                                 cx + centroid_radius, cy + centroid_radius],
+                                fill=centroid_color, outline=centroid_color)
+
+                # Odor overlay near poke port (top-center in unrotated coordinates)
+                if row is not None and starts is not None:
+                    frame_time = pd.to_datetime(row.get('time')) if 'time' in row else None
+                    odor_label = lookup_odor(frame_time.to_datetime64() if frame_time is not None else None)
+                else:
+                    odor_label = None
+
+                odor_text = f"Odor: {odor_label}" if odor_label else "Odor: none"
+                # Anchor in unrotated coords then rotate anchor point
+                anchor_x_raw = width // 2
+                anchor_y_raw = 30
+                anchor_x, anchor_y = rotate_point(anchor_x_raw, anchor_y_raw, width, height, rotate_deg)
+                bbox = draw.textbbox((0, 0), odor_text, font=font_small)
+                box_w = bbox[2] - bbox[0]
+                box_h = bbox[3] - bbox[1]
+                pad = 8
+                draw.rectangle([anchor_x - box_w // 2 - pad, anchor_y - pad,
+                               anchor_x + box_w // 2 + pad, anchor_y + box_h + pad],
+                              fill='black', outline='white', width=2)
+                draw.text((anchor_x - box_w // 2, anchor_y), odor_text, fill='white', font=font_small)
+
                 # Convert back to BGR for OpenCV
                 frame_annotated = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
                 out.write(frame_annotated)
-                
-                frame_idx += 1
+
+                current_frame += 1
                 pbar.update(1)
         
         cap.release()
