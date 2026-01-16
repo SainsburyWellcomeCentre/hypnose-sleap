@@ -1,6 +1,7 @@
 import sleap_io
 import pandas as pd
 import numpy as np
+import re
 from pathlib import Path
 import json
 from hypnose_analysis.paths import get_derivatives_root, get_data_root
@@ -782,11 +783,18 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
                     odor_label = lookup_odor(frame_time.to_datetime64() if frame_time is not None else None)
 
                 if odor_label:
-                    odor_text = f"Odor: {odor_label}"
-                    # Anchor in unrotated coords then rotate anchor point (keep existing position)
+                    display_odor = re.sub(r"(?i)^odor[_\-\s]*", "", str(odor_label)) or str(odor_label)
+                    odor_text = f"Odor: {display_odor}"
+                    # Anchor in unrotated coords then rotate anchor point
                     anchor_x_raw = width // 2
                     anchor_y_raw = 30
                     anchor_x, anchor_y = rotate_point(anchor_x_raw, anchor_y_raw, width, height, rotate_deg)
+
+                    # If rotated 90°, nudge left/up to keep on-screen
+                    if rotate_deg == 90:
+                        anchor_x -= 140
+                        anchor_y -= 30
+
                     draw.text((anchor_x, anchor_y), odor_text, fill=(255, 40, 90), font=font_small)
 
                 # Reward overlays (text only, green) near bottom corners
@@ -794,6 +802,10 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
                 reward_color = (0, 220, 0)
                 x_offset = 140  # pull toward center
                 y_offset = 5    # bind very close to bottom edge
+
+                # Add extra bottom padding when unrotated
+                if rotate_deg == 0:
+                    y_offset = 40
 
                 bbox_reward = draw.textbbox((0, 0), reward_text, font=font_small)
                 text_h = bbox_reward[3] - bbox_reward[1]
