@@ -16,3 +16,6 @@ venv/
 
 .DS_Store
 ._*
+
+# ignore SLEAP project files such as models and labels
+.slp

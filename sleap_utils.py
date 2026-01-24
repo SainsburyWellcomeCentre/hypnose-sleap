@@ -468,7 +468,8 @@ def add_timestamps_to_sleap_tracking(subjid, date, save_output=True):
 
 def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_suffix="sleap_visualization",
                                           centroid_radius=8, centroid_color='red', rotate_deg=0,
-                                          time_window=None):
+                                          time_window=None, reward_display_s: float = 1.0,
+                                          video_indices=None):
     """
     Annotate behavior videos with SLEAP centroid tracking and odor overlays.
 
@@ -497,6 +498,10 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
     time_window : tuple[str | pd.Timedelta, str | pd.Timedelta] | None, optional
         If provided, trims the video to [start, end] relative to the first frame timestamp
         of that video (e.g., ("0:00:00", "0:10:00") for first 10 minutes).
+    reward_display_s : float, optional
+        Duration to display reward labels after supply port onset (default: 1.0 seconds)
+    video_indices : int | Iterable[int] | None, optional
+        1-based video numbers to process (matching *_videoN.csv ordering). If None, process all.
     
     Returns:
     --------
@@ -582,7 +587,23 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
     if not rawdata_session_dir:
         raise FileNotFoundError(f"No rawdata session directory found for date {date}")
     
-    video_files = sorted(rawdata_session_dir.glob("behav/*/VideoData/*.avi"))
+    video_files_all = sorted(rawdata_session_dir.glob("behav/*/VideoData/*.avi"))
+
+    # Filter by requested indices (1-based)
+    if video_indices is None:
+        video_files = [(idx, vf) for idx, vf in enumerate(video_files_all, 1)]
+    else:
+        if isinstance(video_indices, (int, np.integer)):
+            selected = {int(video_indices)}
+        else:
+            try:
+                selected = {int(v) for v in video_indices}
+            except Exception:
+                selected = set()
+        video_files = [(idx, vf) for idx, vf in enumerate(video_files_all, 1) if idx in selected]
+
+    if not video_files:
+        raise FileNotFoundError(f"No video files found for requested indices: {video_indices}")
     
     if not video_files:
         raise FileNotFoundError(f"No video files found in {rawdata_session_dir}")
@@ -597,6 +618,7 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
     
     # Get odor/valve timings directly from raw streams with real timestamps
     valve_events: list[dict] = []
+    supply_events: list[dict] = []
     try:
         # Pick the first experiment root from the first video path (behav/<exp>/VideoData)
         sample_video = next(iter(sorted((base_dir / "rawdata").glob(f"sub-{subjid:03d}_*/ses-*_date-{date}/behav/*/VideoData/*.avi"))))
@@ -633,8 +655,22 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
                         'odor_name': str(odor_name)
                     })
         valve_events.sort(key=lambda ev: ev['start_time'])
+
+        # Supply port pulses (reward delivery), show for reward_display_s after onset
+        for port_num, key in ((1, 'pulse_supply_1'), (2, 'pulse_supply_2')):
+            series = streams.get(key)
+            if series is None or getattr(series, 'empty', True):
+                continue
+            for ts in getattr(series, 'index', []):
+                supply_events.append({
+                    'start_time': ts,
+                    'end_time': ts + pd.Timedelta(seconds=float(reward_display_s)),
+                    'port': port_num
+                })
+        supply_events.sort(key=lambda ev: ev['start_time'])
     except Exception:
         valve_events = []
+        supply_events = []
 
     def lookup_odor(ts):
         if ts is None or not valve_events:
@@ -668,8 +704,8 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
     output_paths = []
     
     # Process each video
-    for video_idx, video_path in enumerate(video_files, 1):
-        print(f"\nProcessing video {video_idx}/{len(video_files)}: {video_path.name}")
+    for video_idx, (video_num, video_path) in enumerate(video_files, 1):
+        print(f"\nProcessing video {video_idx}/{len(video_files)} (original #{video_num}): {video_path.name}")
         
         # Filter combined_df for this video
         video_name = video_path.name  # exact filename match
@@ -735,13 +771,14 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
         else:
             out_size = (width, height)
 
-        # Output video writer
-        output_path = results_dir / f"{output_suffix}_video{video_idx}.mp4"
+        # Output video writer (include rotation to avoid overwriting). Mark _full when no trimming.
+        suffix_full = "_full" if window is None else ""
+        output_path = results_dir / f"{output_suffix}_rotdeg_{rotate_deg}_video{video_num}{suffix_full}.mp4"
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(str(output_path), fourcc, fps, out_size)
         output_paths.append(output_path)
         
-        print(f"  Saving to: {output_path.name}")
+        print(f"  Saving to: {output_path}")
         
         # Use tqdm for progress bar
         frames_to_process = end_frame - start_frame + 1
@@ -777,10 +814,10 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
                                 fill=centroid_color, outline=centroid_color)
 
                 # Odor overlay (text only, neon red); hidden when no odor
+                frame_time = pd.to_datetime(row.get('time')) if (row is not None and 'time' in row) else None
                 odor_label = None
-                if row is not None and valve_events:
-                    frame_time = pd.to_datetime(row.get('time')) if 'time' in row else None
-                    odor_label = lookup_odor(frame_time.to_datetime64() if frame_time is not None else None)
+                if frame_time is not None and valve_events:
+                    odor_label = lookup_odor(frame_time.to_datetime64())
 
                 if odor_label:
                     display_odor = re.sub(r"(?i)^odor[_\-\s]*", "", str(odor_label)) or str(odor_label)
@@ -797,30 +834,40 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
 
                     draw.text((anchor_x, anchor_y), odor_text, fill=(255, 40, 90), font=font_small)
 
-                # Reward overlays (text only, green) near bottom corners
-                reward_text = "Reward"
-                reward_color = (0, 220, 0)
-                x_offset = 140  # pull toward center
-                y_offset = 5    # bind very close to bottom edge
+                # Reward overlays (text only, green) shown when supply ports pulse (1s duration)
+                active_ports = set()
+                if frame_time is not None and supply_events:
+                    active_ports = {
+                        ev['port'] for ev in supply_events
+                        if ev['start_time'] <= frame_time <= ev['end_time']
+                    }
 
-                # Add extra bottom padding when unrotated
-                if rotate_deg == 0:
-                    y_offset = 40
+                if active_ports:
+                    reward_text = "Reward"
+                    reward_color = (0, 220, 0)
+                    x_offset = 140  # pull toward center
+                    y_offset = 5    # bind very close to bottom edge
 
-                bbox_reward = draw.textbbox((0, 0), reward_text, font=font_small)
-                text_h = bbox_reward[3] - bbox_reward[1]
+                    # Add extra bottom padding when unrotated
+                    if rotate_deg == 0:
+                        y_offset = 40
 
-                # Bottom-left
-                bl_x_raw = x_offset
-                bl_y_raw = height - y_offset - text_h
-                bl_x, bl_y = rotate_point(bl_x_raw, bl_y_raw, width, height, rotate_deg)
-                draw.text((bl_x, bl_y), reward_text, fill=reward_color, font=font_small)
+                    bbox_reward = draw.textbbox((0, 0), reward_text, font=font_small)
+                    text_h = bbox_reward[3] - bbox_reward[1]
 
-                # Bottom-right
-                br_x_raw = width - (x_offset + 230)
-                br_y_raw = height - y_offset - text_h
-                br_x, br_y = rotate_point(br_x_raw, br_y_raw, width, height, rotate_deg)
-                draw.text((br_x, br_y), reward_text, fill=reward_color, font=font_small)
+                    # SupplyPort2 -> left (0°) / top (90°)
+                    if 2 in active_ports:
+                        bl_x_raw = x_offset
+                        bl_y_raw = height - y_offset - text_h
+                        bl_x, bl_y = rotate_point(bl_x_raw, bl_y_raw, width, height, rotate_deg)
+                        draw.text((bl_x, bl_y), reward_text, fill=reward_color, font=font_small)
+
+                    # SupplyPort1 -> right (0°) / bottom (90°)
+                    if 1 in active_ports:
+                        br_x_raw = width - (x_offset + 230)
+                        br_y_raw = height - y_offset - text_h
+                        br_x, br_y = rotate_point(br_x_raw, br_y_raw, width, height, rotate_deg)
+                        draw.text((br_x, br_y), reward_text, fill=reward_color, font=font_small)
 
                 # Convert back to BGR for OpenCV
                 frame_annotated = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
