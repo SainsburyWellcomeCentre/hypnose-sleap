@@ -4,15 +4,17 @@ import numpy as np
 import re
 from pathlib import Path
 import json
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 from hypnose_analysis.paths import get_derivatives_root, get_data_root
 from hypnose_analysis.utils.classification_utils import load_all_streams, load_odor_mapping
 from hypnose_analysis.utils.metrics_utils import load_session_results
 
-def sleap_labels_and_centroid(subjid, date, base_dir=None, core_nodes=None):
+def sleap_labels_and_centroid(subjid, date, base_dir=None, core_nodes=None, skip_empty: bool = False):
     """
     Load all .slp files for a subject/date, flatten every frame/instance to CSV,
     and append per-frame centroids from available core nodes.
     Returns a list of saved CSV paths.
+    If skip_empty is True, files with no pose data (or unreadable .slp) are skipped instead of raising.
     """
 
     nan = float("nan")
@@ -174,7 +176,13 @@ def sleap_labels_and_centroid(subjid, date, base_dir=None, core_nodes=None):
         output_path = results_dir / f"sleap_tracking_video{video_number}.csv"
         print(f"\n[{video_number}/{len(slp_files)}] Processing: {slp_path.name}")
 
-        labels = sleap_io.load_slp(str(slp_path))
+        try:
+            labels = sleap_io.load_slp(str(slp_path))
+        except Exception as exc:
+            if skip_empty:
+                print(f"  ⚠️ Failed to read {slp_path.name}: {exc}; skipping")
+                continue
+            raise
         if getattr(labels, "skeletons", None):
             default_nodes = [node.name for node in labels.skeletons[0].nodes]
 
@@ -203,6 +211,9 @@ def sleap_labels_and_centroid(subjid, date, base_dir=None, core_nodes=None):
 
         df = pd.DataFrame(rows)
         if df.empty:
+            if skip_empty:
+                print(f"  ⚠️ No pose data found in {slp_path}, skipping this file")
+                continue
             raise ValueError(f"No pose data found in {slp_path}")
 
         df = df[pd.notna(df["frame"])]
@@ -221,6 +232,9 @@ def sleap_labels_and_centroid(subjid, date, base_dir=None, core_nodes=None):
         print(f"  ✓ Saved to: {output_path.name}")
         print(f"    Total rows: {len(df)}")
         print(f"    Frame range: {int(df['frame'].min())} to {int(df['frame'].max())}")
+
+    if not outputs:
+        raise ValueError("No pose data found in any .slp files for this session")
 
     print("\n✅ All videos processed!")
     return outputs
@@ -883,3 +897,189 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
     
     print(f"\n✅ All videos processed and saved!")
     return output_paths
+
+
+def process_sleap_sessions(subjid: Union[int, Iterable[int]],
+                           date: Optional[Union[int, Iterable[int], Tuple[int, int]]] = None,
+                           base_dir: Optional[Union[str, Path]] = None,
+                           core_nodes: Optional[List[str]] = None,
+                           save_output: bool = True,
+                           recompute: bool = False) -> Dict[int, Dict[str, List[Tuple[str, str]]]]:
+    """
+    Wrapper to run SLEAP centroid extraction and timestamp merging across subjects/dates.
+
+    Parameters
+    ----------
+    subjid : int | Iterable[int]
+        Single subject id or collection of ids.
+    date : int | Iterable[int] | tuple[int, int] | None
+        Single date, list of dates, inclusive range (start, end), or None to process all
+        available dates for each subject.
+    base_dir : str | Path | None
+        Optional base directory. If provided, will try <base_dir>/derivatives for SLEAP files.
+    core_nodes : list[str] | None
+        Forwarded to sleap_labels_and_centroid.
+    save_output : bool
+        Forwarded to add_timestamps_to_sleap_tracking.
+    recompute : bool
+        If False (default), skip sessions where the combined timestamps CSV already exists.
+        If True, always recompute even when outputs are present.
+
+    Returns
+    -------
+    dict
+        Nested summary keyed by subject id with lists of (date, reason) tuples for
+        "success", "failed", and "skipped" entries.
+    """
+
+    def resolve_deriv_root() -> Path:
+        if base_dir:
+            candidate = Path(base_dir).expanduser().resolve()
+            if candidate.name != "derivatives" and (candidate / "derivatives").exists():
+                return (candidate / "derivatives").resolve()
+            return candidate
+        return get_derivatives_root()
+
+    def to_subject_list(val: Union[int, Iterable[int]]) -> List[int]:
+        if isinstance(val, (list, tuple, set)):
+            return [int(v) for v in val]
+        return [int(val)]
+
+    def available_sessions_for_subject(root: Path, subject: int) -> Dict[str, Path]:
+        subj_dirs = sorted(root.glob(f"sub-{subject:03d}_id-*"))
+        if not subj_dirs:
+            return {}
+        subj_dir = subj_dirs[0]
+        sessions = {}
+        for ses_dir in subj_dir.glob("ses-*_date-*"):
+            match = re.search(r"date-(\d+)$", ses_dir.name)
+            if match:
+                sessions[match.group(1)] = ses_dir
+        return sessions
+
+    def normalize_dates(date_input, available: List[str]) -> Tuple[List[str], List[Tuple[str, str]]]:
+        """Return (dates_to_process, skipped_reasons)."""
+        skipped_local: List[Tuple[str, str]] = []
+
+        if date_input is None:
+            return sorted(available), skipped_local
+
+        if isinstance(date_input, tuple) and len(date_input) == 2:
+            start_raw, end_raw = date_input
+            start_dt = pd.to_datetime(str(start_raw), format="%Y%m%d", errors="coerce")
+            end_dt = pd.to_datetime(str(end_raw), format="%Y%m%d", errors="coerce")
+            if pd.isna(start_dt) or pd.isna(end_dt) or end_dt < start_dt:
+                skipped_local.append((f"{start_raw}-{end_raw}", "Invalid date range"))
+                return [], skipped_local
+            dates = [d.strftime("%Y%m%d") for d in pd.date_range(start_dt, end_dt, freq="D")]
+        else:
+            dates = [date_input] if not isinstance(date_input, (list, set, tuple)) else list(date_input)
+            dates = [str(d) for d in dates]
+
+        normalized: List[str] = []
+        for d in dates:
+            if d in available:
+                normalized.append(d)
+            else:
+                skipped_local.append((d, "Session directory not found"))
+        return sorted(normalized), skipped_local
+
+    def count_tracking_files(results_dir: Path) -> int:
+        return len([f for f in results_dir.glob("sleap_tracking_video*.csv") if not f.name.startswith("._")])
+
+    def process_single(subj: int, date_str: str, session_dir: Path, results_dir: Path, centroid_found: int):
+        messages = [f"\nSubject {subj:02d} Date {date_str} - Processing SLEAP Output:"]
+        centroid_done = 0
+        timestamp_found = 0
+        matched_videos = 0
+        saved_flag = False
+
+        try:
+            outputs = sleap_labels_and_centroid(subj, int(date_str), base_dir=base_dir, core_nodes=core_nodes, skip_empty=True)
+            centroid_done = len(outputs)
+            timestamp_found = count_tracking_files(results_dir)
+
+            combined = add_timestamps_to_sleap_tracking(subj, int(date_str), save_output=save_output)
+            if combined is not None and not combined.empty:
+                matched_videos = combined["video_file"].nunique()
+            output_filename = f"sub-{subj:03d}_ses-{date_str}_combined_sleap_tracking_timestamps.csv"
+            saved_flag = (results_dir / output_filename).exists()
+
+            messages.append(f"Centroid Processing: found {centroid_found} video(s) to process.")
+            messages.append(f"        Successfully processed {centroid_done} videos.")
+            messages.append(f"Timestamp Processing: found {timestamp_found} video(s) to process.")
+            messages.append(f"         Successfully matched {matched_videos} video(s) to sleap files, combined sleap file saved = {saved_flag}")
+
+            return {"status": "success", "reason": "", "messages": messages, "subj": subj, "date": date_str}
+        except FileNotFoundError as exc:
+            return {"status": "skipped", "reason": str(exc), "messages": messages + [f"  Skipped: {exc}"], "subj": subj, "date": date_str}
+        except Exception as exc:
+            return {"status": "failed", "reason": str(exc), "messages": messages + [f"  Failed: {exc}"], "subj": subj, "date": date_str}
+
+    summary: Dict[int, Dict[str, List[Tuple[str, str]]]] = {}
+    deriv_root = resolve_deriv_root()
+    subjects = to_subject_list(subjid)
+
+    tasks: List[Tuple[int, str, Path, Path, int]] = []
+
+    for subj in subjects:
+        summary[subj] = {"success": [], "failed": [], "skipped": []}
+
+        sessions = available_sessions_for_subject(deriv_root, subj)
+        if not sessions:
+            summary[subj]["skipped"].append(("ALL", "Subject directory not found"))
+            print(f"Subject {subj:02d}: no subject directory found under {deriv_root}")
+            continue
+
+        dates_to_process, skipped_dates = normalize_dates(date, list(sessions.keys()))
+        summary[subj]["skipped"].extend(skipped_dates)
+
+        if not dates_to_process:
+            print(f"Subject {subj:02d}: no matching dates to process")
+            continue
+
+        for date_str in dates_to_process:
+            session_dir = sessions.get(date_str)
+            results_dir = session_dir / "saved_analysis_results"
+
+            if not results_dir.exists():
+                summary[subj]["skipped"].append((date_str, "Results directory not found"))
+                print(f"Subject {subj:02d} Date {date_str}: results directory missing, skipping")
+                continue
+
+            combined_path = results_dir / f"sub-{subj:03d}_ses-{date_str}_combined_sleap_tracking_timestamps.csv"
+            if combined_path.exists() and not recompute:
+                summary[subj]["skipped"].append((date_str, "Existing combined tracking file, skipping directory"))
+                print(f"Subject {subj:02d} Date {date_str} - Existing combined tracking file, skipping directory (recompute=False)")
+                continue
+
+            slp_files = sorted(results_dir.glob("*.slp"))
+            if not slp_files:
+                summary[subj]["skipped"].append((date_str, "No .slp files found"))
+                print(f"Subject {subj:02d} Date {date_str}: no .slp files, skipping")
+                continue
+
+            tasks.append((subj, date_str, session_dir, results_dir, len(slp_files)))
+
+    if tasks:
+        for task in tasks:
+            result = process_single(*task)
+            status = result["status"]
+            if status == "success":
+                summary[result["subj"]]["success"].append((result["date"], result["reason"]))
+            elif status == "failed":
+                summary[result["subj"]]["failed"].append((result["date"], result["reason"]))
+            else:
+                summary[result["subj"]]["skipped"].append((result["date"], result["reason"]))
+            for line in result["messages"]:
+                print(line)
+
+    print("\nSummary:")
+    for subj, stats in summary.items():
+        total = len(stats["success"]) + len(stats["failed"]) + len(stats["skipped"])
+        print(f"  {subj}:")
+        print(f"    Successful: {len(stats['success'])}/{total}")
+        print(f"    Failed: {len(stats['failed'])}/{total}")
+        print(f"    Skipped: {len(stats['skipped'])}/{total}")
+
+    return summary
