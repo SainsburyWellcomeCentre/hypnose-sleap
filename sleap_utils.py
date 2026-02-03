@@ -706,8 +706,8 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
         "/System/Library/Fonts/Helvetica.ttc",
     ]:
         try:
-            font_large = ImageFont.truetype(font_path, 80)
-            font_small = ImageFont.truetype(font_path, 40)
+            font_large = ImageFont.truetype(font_path, 100)
+            font_small = ImageFont.truetype(font_path, 60)
             break
         except Exception:
             continue
@@ -843,7 +843,7 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
 
                     # If rotated 90°, nudge left/up to keep on-screen
                     if rotate_deg == 90:
-                        anchor_x -= 140
+                        anchor_x -= 185
                         anchor_y -= 30
 
                     draw.text((anchor_x, anchor_y), odor_text, fill=(255, 40, 90), font=font_small)
@@ -879,9 +879,12 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
                     # SupplyPort1 -> right (0°) / bottom (90°)
                     if 1 in active_ports:
                         br_x_raw = width - (x_offset + 230)
-                        br_y_raw = height - y_offset - text_h
+                        br_y_raw = height - y_offset - text_h 
                         br_x, br_y = rotate_point(br_x_raw, br_y_raw, width, height, rotate_deg)
                         draw.text((br_x, br_y), reward_text, fill=reward_color, font=font_small)
+
+                        if rotate_deg == 90:
+                            br_y -= 20
 
                 # Convert back to BGR for OpenCV
                 frame_annotated = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
