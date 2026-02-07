@@ -194,7 +194,9 @@ for SUBJ in "${SUBJECTS[@]}"; do
             mkdir -p "$OUTPUT_DIR"
 
             BASENAME=$(basename "${VIDEO%.avi}")
-            OUTPUT_FILE="${OUTPUT_DIR}/${BASENAME}.predictions.slp"
+            BEHAV_DIR_NAME=$(basename "$TS_DIR")
+            SAFE_PREFIX="${BEHAV_DIR_NAME}__${BASENAME}"
+            OUTPUT_FILE="${OUTPUT_DIR}/${SAFE_PREFIX}.predictions.slp"
 
             # Set PyTorch precision and run inference with batch size
             if python -c "import torch; torch.set_float32_matmul_precision('high')" && \

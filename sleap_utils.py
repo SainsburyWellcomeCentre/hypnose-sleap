@@ -105,6 +105,22 @@ def sleap_labels_and_centroid(subjid, date, base_dir=None, core_nodes=None, skip
 
         return xy, scores
 
+    def infer_video_file_from_slp(slp_path: Path) -> str:
+        """Infer the source AVI basename (with .avi) from a .slp filename that may be prefixed.
+
+        Handles names like "2025-12-11T14-31-20__VideoData_1904-01-16T03-00-00.predictions.slp".
+        """
+        stem = slp_path.name
+        if stem.endswith(".slp"):
+            stem = stem[:-4]
+        if stem.endswith(".predictions"):
+            stem = stem[:-12]
+        if "__" in stem:
+            stem = stem.split("__")[-1]
+        if not stem.endswith(".avi"):
+            stem = f"{stem}.avi"
+        return stem
+
     def to_number(val):
         if val is None:
             return nan
@@ -173,7 +189,9 @@ def sleap_labels_and_centroid(subjid, date, base_dir=None, core_nodes=None, skip
 
     outputs = []
     for video_number, slp_path in enumerate(slp_files, 1):
-        output_path = results_dir / f"sleap_tracking_video{video_number}.csv"
+        video_file_basename = infer_video_file_from_slp(slp_path)
+        safe_tag = video_file_basename.replace(".avi", "")
+        output_path = results_dir / f"sleap_tracking_video{video_number}_{safe_tag}.csv"
         print(f"\n[{video_number}/{len(slp_files)}] Processing: {slp_path.name}")
 
         try:
@@ -195,7 +213,7 @@ def sleap_labels_and_centroid(subjid, date, base_dir=None, core_nodes=None, skip
                     continue
                 xy, scores = extract_points_and_scores(inst, len(node_names))
 
-                row = {"frame": frame_idx, "instance": inst_idx}
+                row = {"frame": frame_idx, "instance": inst_idx, "video_file": video_file_basename}
                 track = getattr(inst, "track", None)
                 if track is not None:
                     row["track"] = getattr(track, "name", None) or getattr(track, "id", None) or str(track)
@@ -393,21 +411,47 @@ def add_timestamps_to_sleap_tracking(subjid, date, save_output=True):
     sleap_video_mapping = {}  # maps video_file to SLEAP CSV path
     
     for csv_path in tracking_csvs:
-        match = re.search(r'sleap_tracking_video(\d+)', csv_path.name)
-        if not match:
-            print(f"Warning: Could not extract video number from {csv_path.name}, skipping")
+        # Try to extract mapping hints
+        video_file_hint = None
+        try:
+            df_head = pd.read_csv(csv_path, nrows=1)
+            if "video_file" in df_head.columns and pd.notna(df_head.loc[0, "video_file"]):
+                video_file_hint = str(df_head.loc[0, "video_file"])
+        except Exception:
+            pass
+
+        name_hint = None
+        m_name = re.search(r"sleap_tracking_video\d+_(.+)\.csv", csv_path.name)
+        if m_name:
+            name_hint = m_name.group(1)
+            if not name_hint.endswith(".avi"):
+                name_hint = f"{name_hint}.avi"
+
+        m_num = re.search(r'sleap_tracking_video(\d+)', csv_path.name)
+        video_num = int(m_num.group(1)) if m_num else None
+        video_idx = video_num - 1 if video_num is not None else None
+
+        # Resolve target video_file in priority: column hint, name hint, numeric index
+        target_video_file = None
+        source = None
+        if video_file_hint and video_file_hint in frames_by_video:
+            target_video_file = video_file_hint
+            source = "video_file column"
+        elif name_hint and name_hint in frames_by_video:
+            target_video_file = name_hint
+            source = "filename suffix"
+        elif video_idx is not None and video_idx < len(video_files_ordered):
+            target_video_file = video_files_ordered[video_idx]
+            source = "numeric index"
+
+        if not target_video_file:
+            print(f"Warning: Could not map {csv_path.name} (hints: {video_file_hint}, {name_hint}); skipping")
             continue
-        
-        video_num = int(match.group(1))  # 1-indexed from filename
-        video_idx = video_num - 1  # Convert to 0-indexed
-        
-        if video_idx >= len(video_files_ordered):
-            print(f"Warning: {csv_path.name} references video {video_num}, but only {len(video_files_ordered)} video(s) exist")
-            continue
-        
-        video_file = video_files_ordered[video_idx]
-        sleap_video_mapping[video_file] = csv_path
-        print(f"Matched {csv_path.name} (video {video_num}) to {video_file}")
+
+        sleap_video_mapping[target_video_file] = csv_path
+        extra = f" via {source}" if source else ""
+        num_txt = f" (video {video_num})" if video_num is not None else ""
+        print(f"Matched {csv_path.name}{num_txt} to {target_video_file}{extra}")
     
     if not sleap_video_mapping:
         raise ValueError("No SLEAP files could be matched to videos")
