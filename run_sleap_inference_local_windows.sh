@@ -186,15 +186,18 @@ for SUBJ in "${SUBJECTS[@]}"; do
         for VIDEO in "${VIDEOS_TO_PROCESS[@]}"; do
             echo "→ Processing: $VIDEO"
 
-            # Extract subject/session folder names
-            SUBJ_DIR_NAME=$(basename "$(dirname "$(dirname "$(dirname "$(dirname "$(dirname "$VIDEO")")")")")") 
+            # Extract subject/session folder names (relative to rawdata hierarchy)
+            SUBJ_DIR_NAME=$(basename "$(dirname "$(dirname "$(dirname "$(dirname "$(dirname "$VIDEO")")")")")")
             SESS_DIR_NAME=$(basename "$(dirname "$(dirname "$(dirname "$(dirname "$VIDEO")")")")")
+
+            # Extract behav folder name directly from the video path to avoid cross-folder reuse
+            # VIDEO: .../behav/<behav_ts>/VideoData/<file>.avi
+            BEHAV_DIR_NAME=$(basename "$(dirname "$(dirname "$VIDEO")")")
 
             OUTPUT_DIR="${DERIV_DIR}/${SUBJ_DIR_NAME}/${SESS_DIR_NAME}/saved_analysis_results"
             mkdir -p "$OUTPUT_DIR"
 
             BASENAME=$(basename "${VIDEO%.avi}")
-            BEHAV_DIR_NAME=$(basename "$TS_DIR")
             SAFE_PREFIX="${BEHAV_DIR_NAME}__${BASENAME}"
             OUTPUT_FILE="${OUTPUT_DIR}/${SAFE_PREFIX}.predictions.slp"
 

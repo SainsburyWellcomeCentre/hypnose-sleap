@@ -106,17 +106,20 @@ def sleap_labels_and_centroid(subjid, date, base_dir=None, core_nodes=None, skip
         return xy, scores
 
     def infer_video_file_from_slp(slp_path: Path) -> str:
-        """Infer the source AVI basename (with .avi) from a .slp filename that may be prefixed.
+        """Infer the source AVI name (with behav prefix) from a .slp filename.
 
-        Handles names like "2025-12-11T14-31-20__VideoData_1904-01-16T03-00-00.predictions.slp".
+        Example: "2025-12-11T14-31-20__VideoData_1904-01-16T03-00-00.predictions.slp"
+        -> "2025-12-11T14-31-20__VideoData_1904-01-16T03-00-00.avi"
         """
         stem = slp_path.name
         if stem.endswith(".slp"):
             stem = stem[:-4]
         if stem.endswith(".predictions"):
             stem = stem[:-12]
+        # Keep prefix if present to disambiguate identical basenames from different behav folders
         if "__" in stem:
-            stem = stem.split("__")[-1]
+            left, right = stem.split("__", 1)
+            stem = f"{left}__{right}"
         if not stem.endswith(".avi"):
             stem = f"{stem}.avi"
         return stem
@@ -294,8 +297,19 @@ def get_video_frame_times(root, verbose=True):
     # Add global frame index (continuous across all videos)
     result['frame'] = range(len(result))
     
-    # Add video file basename for convenience
-    result['video_file'] = result['video_path'].apply(lambda x: Path(x).name if pd.notna(x) else None)
+    # Add disambiguated video file name: behav folder + basename
+    def _disambig_name(p):
+        if pd.isna(p):
+            return None
+        try:
+            path = Path(p)
+            behav = path.parent.parent.name  # .../behav/<behav>/VideoData/file.avi
+            base = path.name
+            return f"{behav}__{base}"
+        except Exception:
+            return Path(p).name if pd.notna(p) else None
+
+    result['video_file'] = result['video_path'].apply(_disambig_name)
     
     # Reorder columns
     result = result[['frame', 'local_frame', 'time', 'video_path', 'video_file']]
@@ -604,6 +618,14 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
         if end_td < start_td:
             raise ValueError("time_window end must be >= start")
         return start_td, end_td
+
+    def disambig_video_name(path: Path) -> str:
+        """Return behav-prefixed video name used in combined timestamps."""
+        try:
+            behav = path.parent.parent.name  # .../behav/<behav>/VideoData/file.avi
+            return f"{behav}__{path.name}"
+        except Exception:
+            return path.name
     
     # Default base directory (use configured data root if none supplied)
     if base_dir is None:
@@ -645,7 +667,10 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
     if not rawdata_session_dir:
         raise FileNotFoundError(f"No rawdata session directory found for date {date}")
     
-    video_files_all = sorted(rawdata_session_dir.glob("behav/*/VideoData/*.avi"))
+    video_files_all = sorted(
+        vf for vf in rawdata_session_dir.glob("behav/*/VideoData/*.avi")
+        if not vf.name.startswith("._")
+    )
 
     # Filter by requested indices (1-based)
     if video_indices is None:
@@ -672,6 +697,7 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
         raise FileNotFoundError(f"No combined timestamps file found in {results_dir}")
     
     combined_df = pd.read_csv(combined_ts_file[0])
+    combined_df["video_file"] = combined_df["video_file"].astype(str)
     print(f"Loaded combined timestamps: {len(combined_df)} frames")
     
     # Get odor/valve timings directly from raw streams with real timestamps
@@ -679,7 +705,16 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
     supply_events: list[dict] = []
     try:
         # Pick the first experiment root from the first video path (behav/<exp>/VideoData)
-        sample_video = next(iter(sorted((base_dir / "rawdata").glob(f"sub-{subjid:03d}_*/ses-*_date-{date}/behav/*/VideoData/*.avi"))))
+        sample_video = next(
+            iter(
+                sorted(
+                    vf for vf in (base_dir / "rawdata").glob(
+                        f"sub-{subjid:03d}_*/ses-*_date-{date}/behav/*/VideoData/*.avi"
+                    )
+                    if not vf.name.startswith("._")
+                )
+            )
+        )
         exp_root = sample_video.parent.parent  # .../behav/<exp>
 
         streams = load_all_streams(exp_root, apply_corrections=True, verbose=False)
@@ -763,14 +798,14 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
     
     # Process each video
     for video_idx, (video_num, video_path) in enumerate(video_files, 1):
-        print(f"\nProcessing video {video_idx}/{len(video_files)} (original #{video_num}): {video_path.name}")
+        video_key = disambig_video_name(video_path)
+        print(f"\nProcessing video {video_idx}/{len(video_files)} (original #{video_num}): {video_key}")
         
         # Filter combined_df for this video
-        video_name = video_path.name  # exact filename match
-        df_video = combined_df[combined_df['video_file'] == video_name].copy()
+        df_video = combined_df[combined_df['video_file'] == video_key].copy()
         
         if df_video.empty:
-            print(f"  ⚠️ No timestamps found for video {video_name}, skipping")
+            print(f"  ⚠️ No timestamps found for video {video_key}, skipping")
             continue
         
         # Convert time column to datetime
