@@ -8,6 +8,7 @@ from typing import Dict, Iterable, List, Optional, Tuple, Union
 from hypnose_analysis.paths import get_derivatives_root, get_data_root
 from hypnose_analysis.utils.classification_utils import load_all_streams, load_odor_mapping
 from hypnose_analysis.utils.metrics_utils import load_session_results
+from hypnose_analysis.utils.visualization_utils import _get_from_cache, _update_cache
 
 def sleap_labels_and_centroid(subjid, date, base_dir=None, core_nodes=None, skip_empty: bool = False):
     """
@@ -292,10 +293,18 @@ def get_video_frame_times(root, verbose=True):
         'time': video_data.index,
         'local_frame': video_data['_frame'],
         'video_path': video_data['_path'],
+        'hw_counter': video_data.get('hw_counter'),
+        'hw_timestamp': video_data.get('hw_timestamp'),
     })
     
     # Add global frame index (continuous across all videos)
     result['frame'] = range(len(result))
+
+    # Normalize dtypes for hardware columns
+    if 'hw_counter' in result:
+        result['hw_counter'] = pd.to_numeric(result['hw_counter'], errors='coerce').astype('Int64')
+    if 'hw_timestamp' in result:
+        result['hw_timestamp'] = pd.to_numeric(result['hw_timestamp'], errors='coerce')
     
     # Add disambiguated video file name: behav folder + basename
     def _disambig_name(p):
@@ -312,7 +321,7 @@ def get_video_frame_times(root, verbose=True):
     result['video_file'] = result['video_path'].apply(_disambig_name)
     
     # Reorder columns
-    result = result[['frame', 'local_frame', 'time', 'video_path', 'video_file']]
+    result = result[['frame', 'local_frame', 'hw_counter', 'hw_timestamp', 'time', 'video_path', 'video_file']]
     
     if verbose:
         print(f"Found {len(result)} video frames across {result['video_file'].nunique()} video files")
@@ -491,8 +500,15 @@ def add_timestamps_to_sleap_tracking(subjid, date, save_output=True):
         
         # Merge to add timestamps - match on 'frame' column (local frame index within video)
         # Use left join to keep all SLEAP frames
+        # Prefer hardware counter/timestamp for downstream alignment; merge keeps both
+        merge_cols = ['local_frame', 'time', 'global_frame']
+        if 'hw_counter' in video_frames.columns:
+            merge_cols.append('hw_counter')
+        if 'hw_timestamp' in video_frames.columns:
+            merge_cols.append('hw_timestamp')
+
         result = tracking_df.merge(
-            video_frames[['local_frame', 'time', 'global_frame']],
+            video_frames[merge_cols],
             left_on='frame',
             right_on='local_frame',
             how='left'
@@ -514,7 +530,7 @@ def add_timestamps_to_sleap_tracking(subjid, date, save_output=True):
     combined = combined.sort_values('time', na_position='last').reset_index(drop=True)
     
     # Reorder columns - put frame/time/video info first
-    priority_cols = ['frame', 'time', 'global_frame', 'video_file', 'instance']
+    priority_cols = ['frame', 'time', 'global_frame', 'hw_counter', 'hw_timestamp', 'video_file', 'instance']
     other_cols = [c for c in combined.columns if c not in priority_cols]
     priority_cols = [c for c in priority_cols if c in combined.columns]
     combined = combined[priority_cols + other_cols]
@@ -541,7 +557,7 @@ def add_timestamps_to_sleap_tracking(subjid, date, save_output=True):
 def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_suffix="sleap_visualization",
                                           centroid_radius=8, centroid_color='red', rotate_deg=0,
                                           time_window=None, reward_display_s: float = 1.0,
-                                          video_indices=None):
+                                          video_indices=None, mark_timepoint: str | None = None):
     """
     Annotate behavior videos with SLEAP centroid tracking and odor overlays.
 
@@ -574,6 +590,9 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
         Duration to display reward labels after supply port onset (default: 1.0 seconds)
     video_indices : int | Iterable[int] | None, optional
         1-based video numbers to process (matching *_videoN.csv ordering). If None, process all.
+    mark_timepoint : str | None, optional
+        Absolute clock time ("HH:MM:SS" or "HH:MM:SS.mmm") within the session to mark with a
+        downward green triangle at the center of the video for 2 seconds. Ignored if None or not parsable.
     
     Returns:
     --------
@@ -619,6 +638,21 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
             raise ValueError("time_window end must be >= start")
         return start_td, end_td
 
+    def parse_mark_timepoint(ts_str):
+        if not ts_str:
+            return None
+        ts_str = str(ts_str).strip()
+        # Try as clock time with date
+        ts_abs = pd.to_datetime(f"{date_str} {ts_str}", errors="coerce")
+        if pd.isna(ts_abs):
+            # Try as timedelta from midnight
+            td = pd.to_timedelta(ts_str, errors="coerce")
+            if pd.isna(td):
+                return None
+            # Anchor to date midnight
+            ts_abs = pd.to_datetime(date_str, errors="coerce") + td
+        return ts_abs
+
     def disambig_video_name(path: Path) -> str:
         """Return behav-prefixed video name used in combined timestamps."""
         try:
@@ -627,6 +661,8 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
         except Exception:
             return path.name
     
+    date_str = str(date)
+
     # Default base directory (use configured data root if none supplied)
     if base_dir is None:
         base_dir = get_data_root()
@@ -645,7 +681,7 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
         raise FileNotFoundError(f"No subject directory found for pattern {subj_pattern}")
     
     subj_dir = subj_dirs[0]
-    session_pattern = f"ses-*_date-{date}"
+    session_pattern = f"ses-*_date-{date_str}"
     session_dirs = list(subj_dir.glob(session_pattern))
     
     if not session_dirs:
@@ -662,7 +698,7 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
         raise FileNotFoundError(f"No rawdata subject directory found")
     
     rawdata_subj_dir = rawdata_subj_dirs[0]
-    rawdata_session_dir = next(rawdata_subj_dir.glob(f"ses-*_date-{date}"), None)
+    rawdata_session_dir = next(rawdata_subj_dir.glob(f"ses-*_date-{date_str}"), None)
     
     if not rawdata_session_dir:
         raise FileNotFoundError(f"No rawdata session directory found for date {date}")
@@ -691,79 +727,102 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
     if not video_files:
         raise FileNotFoundError(f"No video files found in {rawdata_session_dir}")
     
-    # Load combined timestamps file
-    combined_ts_file = list(results_dir.glob("*_combined_sleap_tracking_timestamps.csv"))
-    if not combined_ts_file:
-        raise FileNotFoundError(f"No combined timestamps file found in {results_dir}")
-    
-    combined_df = pd.read_csv(combined_ts_file[0])
-    combined_df["video_file"] = combined_df["video_file"].astype(str)
-    print(f"Loaded combined timestamps: {len(combined_df)} frames")
+    cache_kind = "sleap_annotate"
+    cached = _get_from_cache(subjid, date, kind=cache_kind)
+    combined_df = None
+    valve_events = None
+    supply_events = None
+
+    if isinstance(cached, dict):
+        combined_df = cached.get("combined_df")
+        valve_events = cached.get("valve_events")
+        supply_events = cached.get("supply_events")
+
+    if combined_df is None:
+        combined_ts_file = list(results_dir.glob("*_combined_sleap_tracking_timestamps.csv"))
+        if not combined_ts_file:
+            raise FileNotFoundError(f"No combined timestamps file found in {results_dir}")
+
+        combined_df = pd.read_csv(combined_ts_file[0])
+        combined_df["video_file"] = combined_df["video_file"].astype(str)
+        print(f"Loaded combined timestamps: {len(combined_df)} frames")
+    else:
+        combined_df = combined_df.copy()
+        combined_df["video_file"] = combined_df["video_file"].astype(str)
+        print(f"Loaded combined timestamps from cache: {len(combined_df)} frames")
     
     # Get odor/valve timings directly from raw streams with real timestamps
-    valve_events: list[dict] = []
-    supply_events: list[dict] = []
-    try:
-        # Pick the first experiment root from the first video path (behav/<exp>/VideoData)
-        sample_video = next(
-            iter(
-                sorted(
-                    vf for vf in (base_dir / "rawdata").glob(
-                        f"sub-{subjid:03d}_*/ses-*_date-{date}/behav/*/VideoData/*.avi"
-                    )
-                    if not vf.name.startswith("._")
-                )
-            )
-        )
-        exp_root = sample_video.parent.parent  # .../behav/<exp>
-
-        streams = load_all_streams(exp_root, apply_corrections=True, verbose=False)
-        odor_map = load_odor_mapping(exp_root, data=streams, verbose=False)
-
-        olfactometer_valves = odor_map.get('olfactometer_valves', {}) if odor_map else {}
-        valve_to_odor = odor_map.get('valve_to_odor', {}) if odor_map else {}
-
-        for olf_id, valve_df in (olfactometer_valves or {}).items():
-            if valve_df is None or getattr(valve_df, 'empty', True):
-                continue
-            for valve_idx, valve_col in enumerate(valve_df.columns):
-                valve_key = f"{olf_id}{valve_idx}"
-                odor_name = valve_to_odor.get(valve_key)
-                if not odor_name or str(odor_name).lower() == 'purge':
-                    continue
-                series = valve_df[valve_col].astype(bool)
-                on_edges = series & ~series.shift(1, fill_value=False)
-                off_edges = ~series & series.shift(1, fill_value=False)
-                on_times = list(series.index[on_edges])
-                off_times = list(series.index[off_edges])
-                j = 0
-                for on_time in on_times:
-                    while j < len(off_times) and off_times[j] <= on_time:
-                        j += 1
-                    if j >= len(off_times):
-                        break
-                    valve_events.append({
-                        'start_time': on_time,
-                        'end_time': off_times[j],
-                        'odor_name': str(odor_name)
-                    })
-        valve_events.sort(key=lambda ev: ev['start_time'])
-
-        # Supply port pulses (reward delivery), show for reward_display_s after onset
-        for port_num, key in ((1, 'pulse_supply_1'), (2, 'pulse_supply_2')):
-            series = streams.get(key)
-            if series is None or getattr(series, 'empty', True):
-                continue
-            for ts in getattr(series, 'index', []):
-                supply_events.append({
-                    'start_time': ts,
-                    'end_time': ts + pd.Timedelta(seconds=float(reward_display_s)),
-                    'port': port_num
-                })
-        supply_events.sort(key=lambda ev: ev['start_time'])
-    except Exception:
+    if valve_events is None or supply_events is None:
         valve_events = []
         supply_events = []
+        try:
+            # Pick the first experiment root from the first video path (behav/<exp>/VideoData)
+            sample_video = next(
+                iter(
+                    sorted(
+                        vf for vf in (base_dir / "rawdata").glob(
+                            f"sub-{subjid:03d}_*/ses-*_date-{date}/behav/*/VideoData/*.avi"
+                        )
+                        if not vf.name.startswith("._")
+                    )
+                )
+            )
+            exp_root = sample_video.parent.parent  # .../behav/<exp>
+
+            streams = load_all_streams(exp_root, apply_corrections=True, verbose=False)
+            odor_map = load_odor_mapping(exp_root, data=streams, verbose=False)
+
+            olfactometer_valves = odor_map.get('olfactometer_valves', {}) if odor_map else {}
+            valve_to_odor = odor_map.get('valve_to_odor', {}) if odor_map else {}
+
+            for olf_id, valve_df in (olfactometer_valves or {}).items():
+                if valve_df is None or getattr(valve_df, 'empty', True):
+                    continue
+                for valve_idx, valve_col in enumerate(valve_df.columns):
+                    valve_key = f"{olf_id}{valve_idx}"
+                    odor_name = valve_to_odor.get(valve_key)
+                    if not odor_name or str(odor_name).lower() == 'purge':
+                        continue
+                    series = valve_df[valve_col].astype(bool)
+                    on_edges = series & ~series.shift(1, fill_value=False)
+                    off_edges = ~series & series.shift(1, fill_value=False)
+                    on_times = list(series.index[on_edges])
+                    off_times = list(series.index[off_edges])
+                    j = 0
+                    for on_time in on_times:
+                        while j < len(off_times) and off_times[j] <= on_time:
+                            j += 1
+                        if j >= len(off_times):
+                            break
+                        valve_events.append({
+                            'start_time': on_time,
+                            'end_time': off_times[j],
+                            'odor_name': str(odor_name)
+                        })
+            valve_events.sort(key=lambda ev: ev['start_time'])
+
+            # Supply port pulses (reward delivery), show for reward_display_s after onset
+            for port_num, key in ((1, 'pulse_supply_1'), (2, 'pulse_supply_2')):
+                series = streams.get(key)
+                if series is None or getattr(series, 'empty', True):
+                    continue
+                for ts in getattr(series, 'index', []):
+                    supply_events.append({
+                        'start_time': ts,
+                        'end_time': ts + pd.Timedelta(seconds=float(reward_display_s)),
+                        'port': port_num
+                    })
+            supply_events.sort(key=lambda ev: ev['start_time'])
+        except Exception:
+            valve_events = []
+            supply_events = []
+
+        # Persist to cache for reuse
+        _update_cache(subjid, [date], {date: {
+            "combined_df": combined_df,
+            "valve_events": valve_events,
+            "supply_events": supply_events,
+        }}, kind=cache_kind)
 
     def lookup_odor(ts):
         if ts is None or not valve_events:
@@ -794,6 +853,11 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
         font_large = ImageFont.load_default()
         font_small = ImageFont.load_default()
     
+    # Parse optional marker timepoint (absolute clock within session)
+    mark_ts_abs = parse_mark_timepoint(mark_timepoint) if mark_timepoint else None
+    if mark_timepoint and mark_ts_abs is None:
+        print(f"Warning: could not parse mark_timepoint='{mark_timepoint}', skipping marker")
+
     output_paths = []
     
     # Process each video
@@ -875,6 +939,11 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
         
         # Use tqdm for progress bar
         frames_to_process = end_frame - start_frame + 1
+
+        # Precompute marker window for this video if applicable
+        mark_window = None
+        if mark_ts_abs is not None:
+            mark_window = (mark_ts_abs, mark_ts_abs + pd.Timedelta(seconds=2.0))
 
         with tqdm(total=frames_to_process, desc="  Encoding", unit="frames") as pbar:
             current_frame = start_frame
@@ -964,6 +1033,14 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
 
                         if rotate_deg == 90:
                             br_y -= 20
+
+                # Mark specific timepoint with a downward green triangle for 2 seconds
+                if mark_window and frame_time is not None:
+                    if mark_window[0] <= frame_time <= mark_window[1]:
+                        cx = frame_w // 2
+                        cy = frame_h // 2
+                        tri = [(cx - 60, cy - 40), (cx + 60, cy - 40), (cx, cy + 40)]
+                        draw.polygon(tri, fill=(0, 200, 0))
 
                 # Convert back to BGR for OpenCV
                 frame_annotated = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
