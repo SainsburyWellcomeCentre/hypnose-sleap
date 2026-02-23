@@ -1114,6 +1114,7 @@ def process_sleap_sessions(subjid: Union[int, Iterable[int]],
                            base_dir: Optional[Union[str, Path]] = None,
                            core_nodes: Optional[List[str]] = None,
                            save_output: bool = True,
+                           anchor_threshold: Optional[float] = None,
                            recompute: bool = False) -> Dict[int, Dict[str, List[Tuple[str, str]]]]:
     """
     Wrapper to run SLEAP centroid extraction and timestamp merging across subjects/dates.
@@ -1131,6 +1132,8 @@ def process_sleap_sessions(subjid: Union[int, Iterable[int]],
         Forwarded to sleap_labels_and_centroid.
     save_output : bool
         Forwarded to add_timestamps_to_sleap_tracking.
+    anchor_threshold : float | None
+        Forwarded to sleap_labels_and_centroid.
     recompute : bool
         If False (default), skip sessions where the combined timestamps CSV already exists.
         If True, always recompute even when outputs are present.
@@ -1205,7 +1208,7 @@ def process_sleap_sessions(subjid: Union[int, Iterable[int]],
         saved_flag = False
 
         try:
-            outputs = sleap_labels_and_centroid(subj, int(date_str), base_dir=base_dir, core_nodes=core_nodes, skip_empty=True)
+            outputs = sleap_labels_and_centroid(subj, int(date_str), base_dir=base_dir, core_nodes=core_nodes, skip_empty=True, anchor_threshold=anchor_threshold)
             centroid_done = len(outputs)
             timestamp_found = count_tracking_files(results_dir)
 
