@@ -10,10 +10,20 @@ from hypnose_analysis.utils.classification_utils import load_all_streams, load_o
 from hypnose_analysis.utils.metrics_utils import load_session_results
 from hypnose_analysis.utils.visualization_utils import _get_from_cache, _update_cache
 
-def sleap_labels_and_centroid(subjid, date, base_dir=None, core_nodes=None, skip_empty: bool = False):
+def sleap_labels_and_centroid(
+    subjid,
+    date,
+    base_dir=None,
+    core_nodes=None,
+    skip_empty: bool = False,
+    anchor_threshold: Optional[float] = 150.0,
+):
     """
     Load all .slp files for a subject/date, flatten every frame/instance to CSV,
     and append per-frame centroids from available core nodes.
+    Centroid uses an anchor-based filter: nodes farther than `anchor_threshold`
+    pixels from the previous centroid are ignored until they re-enter the window
+    (set anchor_threshold=None to disable filtering).
     Returns a list of saved CSV paths.
     If skip_empty is True, files with no pose data (or unreadable .slp) are skipped instead of raising.
     """
@@ -244,9 +254,50 @@ def sleap_labels_and_centroid(subjid, date, base_dir=None, core_nodes=None, skip
 
         centroid_x_cols = [f"{node}_x" for node in core_nodes if f"{node}_x" in df.columns]
         centroid_y_cols = [f"{node}_y" for node in core_nodes if f"{node}_y" in df.columns]
+        available_nodes = [node for node in core_nodes if f"{node}_x" in df.columns]
 
-        df["centroid_x"] = df[centroid_x_cols].mean(axis=1, skipna=True) if centroid_x_cols else pd.NA
-        df["centroid_y"] = df[centroid_y_cols].mean(axis=1, skipna=True) if centroid_y_cols else pd.NA
+        if centroid_x_cols and centroid_y_cols:
+            xs = df[centroid_x_cols].to_numpy(dtype=float)
+            ys = df[centroid_y_cols].to_numpy(dtype=float)
+
+            n_frames = len(df)
+            centroid_x_out = np.full(n_frames, np.nan)
+            centroid_y_out = np.full(n_frames, np.nan)
+            nodes_used: List[str] = [""] * n_frames
+
+            anchor_x = np.nan
+            anchor_y = np.nan
+
+            for i in range(n_frames):
+                row_x = xs[i]
+                row_y = ys[i]
+
+                valid_mask = ~np.isnan(row_x) & ~np.isnan(row_y)
+
+                if anchor_threshold is not None and not np.isnan(anchor_x) and valid_mask.any():
+                    dist = np.sqrt((row_x - anchor_x) ** 2 + (row_y - anchor_y) ** 2)
+                    within_mask = valid_mask & (dist <= float(anchor_threshold))
+                else:
+                    within_mask = valid_mask
+
+                if within_mask.any():
+                    cx = float(np.nanmean(row_x[within_mask]))
+                    cy = float(np.nanmean(row_y[within_mask]))
+                    centroid_x_out[i] = cx
+                    centroid_y_out[i] = cy
+                    anchor_x = cx
+                    anchor_y = cy
+                    nodes_used[i] = ";".join(np.array(available_nodes)[within_mask])
+                else:
+                    nodes_used[i] = ""
+
+            df["centroid_x"] = centroid_x_out
+            df["centroid_y"] = centroid_y_out
+            df["nodes_for_centroid"] = nodes_used
+        else:
+            df["centroid_x"] = pd.NA
+            df["centroid_y"] = pd.NA
+            df["nodes_for_centroid"] = ""
 
         df.to_csv(output_path, index=False)
 
