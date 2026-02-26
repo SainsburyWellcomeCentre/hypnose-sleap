@@ -4,6 +4,7 @@ import numpy as np
 import re
 from pathlib import Path
 import json
+import gc
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 from hypnose_analysis.paths import get_derivatives_root, get_data_root
 from hypnose_analysis.utils.classification_utils import load_all_streams, load_odor_mapping
@@ -208,38 +209,44 @@ def sleap_labels_and_centroid(
         output_path = results_dir / f"sleap_tracking_video{video_number}_{safe_tag}.csv"
         print(f"\n[{video_number}/{len(slp_files)}] Processing: {slp_path.name}")
 
+        labels = None
         try:
             labels = sleap_io.load_slp(str(slp_path))
+
+            if getattr(labels, "skeletons", None):
+                default_nodes = [node.name for node in labels.skeletons[0].nodes]
+
+            rows = []
+            for lf in getattr(labels, "labeled_frames", []):
+                frame_idx = getattr(lf, "frame_idx", getattr(lf, "frame", pd.NA))
+                for inst_idx, inst in enumerate(getattr(lf, "instances", [])):
+                    node_names = node_names_for_instance(inst, default_nodes)
+                    if not node_names:
+                        continue
+                    xy, scores = extract_points_and_scores(inst, len(node_names))
+
+                    row = {"frame": frame_idx, "instance": inst_idx, "video_file": video_file_basename}
+                    track = getattr(inst, "track", None)
+                    if track is not None:
+                        row["track"] = getattr(track, "name", None) or getattr(track, "id", None) or str(track)
+
+                    for node_name, (x, y) in zip(node_names, xy):
+                        row[f"{node_name}_x"] = to_number(x)
+                        row[f"{node_name}_y"] = to_number(y)
+                    if scores is not None:
+                        for node_name, score in zip(node_names, scores):
+                            row[f"{node_name}_score"] = to_number(score)
+
+                    rows.append(row)
+
         except Exception as exc:
             if skip_empty:
                 print(f"  ⚠️ Failed to read {slp_path.name}: {exc}; skipping")
                 continue
             raise
-        if getattr(labels, "skeletons", None):
-            default_nodes = [node.name for node in labels.skeletons[0].nodes]
-
-        rows = []
-        for lf in getattr(labels, "labeled_frames", []):
-            frame_idx = getattr(lf, "frame_idx", getattr(lf, "frame", pd.NA))
-            for inst_idx, inst in enumerate(getattr(lf, "instances", [])):
-                node_names = node_names_for_instance(inst, default_nodes)
-                if not node_names:
-                    continue
-                xy, scores = extract_points_and_scores(inst, len(node_names))
-
-                row = {"frame": frame_idx, "instance": inst_idx, "video_file": video_file_basename}
-                track = getattr(inst, "track", None)
-                if track is not None:
-                    row["track"] = getattr(track, "name", None) or getattr(track, "id", None) or str(track)
-
-                for node_name, (x, y) in zip(node_names, xy):
-                    row[f"{node_name}_x"] = to_number(x)
-                    row[f"{node_name}_y"] = to_number(y)
-                if scores is not None:
-                    for node_name, score in zip(node_names, scores):
-                        row[f"{node_name}_score"] = to_number(score)
-
-                rows.append(row)
+        finally:
+            del labels
+            gc.collect()
 
         df = pd.DataFrame(rows)
         if df.empty:
