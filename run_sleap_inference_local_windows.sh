@@ -26,6 +26,7 @@ MODEL="$DEFAULT_MODEL"
 BASE_DIR="$DEFAULT_BASE_DIR"
 DERIV_DIR="$DEFAULT_DERIV_DIR"
 BATCH_SIZE="$DEFAULT_BATCH_SIZE"
+DERIV_OVERRIDE=0
 
 # ======================================
 # HELPERS
@@ -65,6 +66,22 @@ add_dates_from_token() {
     fi
 }
 
+resolve_output_dir() {
+    local token="$1"
+    case "${token^^}" in
+        E:|E:/)
+            echo "E:/derivatives"
+            ;;
+        Z:|Z:/)
+            echo "Z:/hypnose/derivatives"
+            ;;
+        *)
+            # Fallback: treat token as explicit path
+            echo "${token%/}"
+            ;;
+    esac
+}
+
 # ======================================
 # ARGUMENT PARSING
 # ======================================
@@ -95,6 +112,11 @@ while [[ $# -gt 0 ]]; do
             BASE_DIR="$2"
             shift 2
             ;;
+        -o|--output-dir)
+            DERIV_DIR="$(resolve_output_dir "$2")"
+            DERIV_OVERRIDE=1
+            shift 2
+            ;;
         -bz|--batch-size)
             BATCH_SIZE="$2"
             shift 2
@@ -107,9 +129,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ ${#SUBJECTS[@]} -eq 0 ]]; then
-    echo "Usage: bash run_sleap_inference_local.sh -s <SUBJ> [SUBJ2 ...] [-d <DATE|DATE_RANGE> ...] [-m <MODEL>] [-b <BASE_DIR>] [-bz <BATCH_SIZE>]"
+    echo "Usage: bash run_sleap_inference_local.sh -s <SUBJ> [SUBJ2 ...] [-d <DATE|DATE_RANGE> ...] [-m <MODEL>] [-b <BASE_DIR>] [-o <OUTPUT_ROOT>] [-bz <BATCH_SIZE>]"
     echo "Dates can be YYYYMMDD or YYYYMMDD-YYYYMMDD (inclusive range). If -d is omitted, all dates found for each subject are processed."
     echo "Defaults: MODEL=$DEFAULT_MODEL, BASE_DIR=$DEFAULT_BASE_DIR, DERIV_DIR=$DEFAULT_DERIV_DIR, BATCH_SIZE=$DEFAULT_BATCH_SIZE"
+    echo "-o shortcuts: 'E:' → E:/derivatives, 'Z:' → Z:/hypnose/derivatives (or pass a full path)."
     exit 1
 fi
 
@@ -117,6 +140,11 @@ fi
 if [[ "$BASE_DIR" == "$DEFAULT_BASE_DIR" && -d "E:/rawdata" ]]; then
     echo "Detected local copy at E:/rawdata; switching BASE_DIR to E:/"
     BASE_DIR="E:"
+fi
+
+# Keep derivatives path in sync with the chosen base directory unless overridden
+if [[ $DERIV_OVERRIDE -eq 0 ]]; then
+    DERIV_DIR="${BASE_DIR%/}/derivatives"
 fi
 
 # ======================================
