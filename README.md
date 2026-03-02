@@ -63,3 +63,30 @@ Clone repo on the HPC. Make scripts executable using:
 Submit job: 
     - cd into the sleap-hypnose folder containing the scripts
     - run: ./submit_sleap_inference.sh -s 40 -d 20251128 -m ./models/251031_100645.single_instance.n=160
+
+## Transfer SLEAP results locally
+
+Use the PowerShell helper [transfer_sleap_results.ps1] to copy tracking CSVs from a local run (defaults to E:/derivatives) to mounted server (defaults to Z:/hypnose/derivatives) while preserving the folder structure.
+
+- Matches files containing sleap_tracking_video or combined_sleap_tracking_timestamps
+- Preserves sub-XXX/ses-XXX_date-YYYYMMDD/saved_analysis_results layout
+- Optional filters: subjects via -Sub, dates or date ranges via -Date
+
+Examples (run from this folder in PowerShell):
+
+```
+# Preview without copying and show what files are skipped (usually .slp files) 
+./transfer_sleap_results.ps1 -DryRun -ShowSkipped
+
+# Copy everything matching the patterns
+./transfer_sleap_results.ps1
+
+# Copy only specific subjects
+./transfer_sleap_results.ps1 -Sub 45 46 47
+
+# Copy specific dates and/or a range (inclusive)
+./transfer_sleap_results.ps1 -Date 20260213 20260217-20260220
+
+# Combine subject and date filters
+./transfer_sleap_results.ps1 -Sub 45 -Date 20260213-20260220
+```
