@@ -641,9 +641,12 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
         Color of centroid marker (default: 'red')
     rotate_deg : int, optional
         Rotate output video by 0, 90, 180, or 270 degrees clockwise (default: 0)
-    time_window : tuple[str | pd.Timedelta, str | pd.Timedelta] | None, optional
-        If provided, trims the video to [start, end] relative to the first frame timestamp
-        of that video (e.g., ("0:00:00", "0:10:00") for first 10 minutes).
+    time_window : tuple[str | pd.Timedelta, str | pd.Timedelta] | list[tuple] | None, optional
+        Provide a single (start, end) pair to trim once, or a list of pairs to render
+        multiple clips per video. Windows are relative to the first frame timestamp of
+        that video (e.g., ("0:00:00", "0:10:00") for first 10 minutes). Each window
+        outputs a separate file suffixed with _window1, _window2, etc. Passing None keeps
+        the full video (_full suffix).
     reward_display_s : float, optional
         Duration to display reward labels after supply port onset (default: 1.0 seconds)
     video_indices : int | Iterable[int] | None, optional
@@ -685,16 +688,46 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
             return cv2.rotate(frame_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
         raise ValueError("rotate_deg must be one of {0, 90, 180, 270}")
 
-    def parse_time_window(window):
+    def parse_single_time_window(window):
         if window is None:
             return None
         if len(window) != 2:
-            raise ValueError("time_window must be a tuple of (start, end)")
+            raise ValueError("Each time window must be a (start, end) pair")
         start_td = pd.to_timedelta(window[0])
         end_td = pd.to_timedelta(window[1])
+        if pd.isna(start_td) or pd.isna(end_td):
+            raise ValueError("Could not parse time window values")
         if end_td < start_td:
             raise ValueError("time_window end must be >= start")
         return start_td, end_td
+
+    def normalize_time_windows(window_spec):
+        if window_spec is None:
+            return [None]
+
+        if isinstance(window_spec, (list, tuple)):
+            if not window_spec:
+                return [None]
+
+            first = window_spec[0]
+            is_sequence = isinstance(first, (list, tuple)) and not isinstance(first, str)
+
+            # If the user passed a single (start, end) tuple/list, treat it as one window
+            if not is_sequence and len(window_spec) == 2 and not isinstance(window_spec[0], (list, tuple)):
+                return [parse_single_time_window(window_spec)]
+
+            # Otherwise treat the outer iterable as a collection of windows
+            windows = []
+            for idx, win in enumerate(window_spec, 1):
+                if win is None:
+                    windows.append(None)
+                    continue
+                if not isinstance(win, (list, tuple)):
+                    raise ValueError(f"Time window #{idx} must be a (start, end) pair")
+                windows.append(parse_single_time_window(win))
+            return windows
+
+        raise ValueError("time_window must be None, a single (start, end) pair, or an iterable of such pairs")
 
     def parse_mark_timepoint(ts_str):
         if not ts_str:
@@ -916,6 +949,8 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
     if mark_timepoint and mark_ts_abs is None:
         print(f"Warning: could not parse mark_timepoint='{mark_timepoint}', skipping marker")
 
+    time_windows_to_process = normalize_time_windows(time_window)
+
     output_paths = []
     
     # Process each video
@@ -939,178 +974,168 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
                 .groupby('frame', as_index=False)
                 .agg({'centroid_x': 'mean', 'centroid_y': 'mean', 'time': 'first'}))
 
-        # Apply optional time window relative to first frame time
-        window = parse_time_window(time_window)
-        if window:
-            start_abs = df_video['time'].min() + window[0]
-            end_abs = df_video['time'].min() + window[1]
-            df_video = df_video[(df_video['time'] >= start_abs) & (df_video['time'] <= end_abs)].copy()
-            if df_video.empty:
-                print("  ⚠️ No frames in requested time window, skipping video")
-                continue
-            print(f"  Trimmed to window: {window[0]} - {window[1]} ({len(df_video)} frames)")
-        else:
-            start_abs = None
-            end_abs = None
-        
         print(f"  Found {len(df_video)} frames with timestamps")
-        
-        # Load video with OpenCV for frame-by-frame processing
-        cap = cv2.VideoCapture(str(video_path))
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        
+
+        # Probe video metadata once; reopen per window for decoding
+        cap_probe = cv2.VideoCapture(str(video_path))
+        fps = cap_probe.get(cv2.CAP_PROP_FPS)
+        width = int(cap_probe.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap_probe.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap_probe.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap_probe.release()
+
         print(f"  Video: {width}x{height} @ {fps} fps, {total_frames} frames")
-        
-        # Frame mapping by local frame index for fast lookup
-        df_video['frame'] = pd.to_numeric(df_video['frame'], errors='coerce').astype('Int64')
-        df_video = df_video.dropna(subset=['frame'])
-        row_map = df_video.set_index('frame').to_dict('index')
-        valid_frames = sorted(row_map.keys())
-        if not valid_frames:
-            print("  ⚠️ No valid frames with centroid, skipping video")
-            cap.release()
-            continue
 
-        start_frame = int(valid_frames[0])
-        end_frame = int(valid_frames[-1])
+        df_video_base = df_video.copy()
 
-        # Seek to start frame
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        for window_idx, window in enumerate(time_windows_to_process, 1):
+            df_window = df_video_base.copy()
+            window_label = f"window{window_idx}" if window is not None else "full"
 
-        # Rotation-aware output size
-        if rotate_deg in (90, 270):
-            out_size = (height, width)
-        else:
-            out_size = (width, height)
+            if window is not None:
+                base_time = df_window['time'].min()
+                if pd.isna(base_time):
+                    print(f"  ⚠️ Window {window_label}: missing base timestamp, skipping")
+                    continue
+                start_abs = base_time + window[0]
+                end_abs = base_time + window[1]
+                df_window = df_window[(df_window['time'] >= start_abs) & (df_window['time'] <= end_abs)].copy()
+                if df_window.empty:
+                    print(f"  ⚠️ Window {window_label}: no frames in requested time bounds, skipping")
+                    continue
+                print(f"  Window {window_label}: {window[0]} - {window[1]} ({len(df_window)} frames)")
+            else:
+                print(f"  Window {window_label}: full duration ({len(df_window)} frames)")
 
-        # Output video writer (include rotation to avoid overwriting). Mark _full when no trimming.
-        suffix_full = "_full" if window is None else ""
-        output_path = results_dir / f"{output_suffix}_rotdeg_{rotate_deg}_video{video_num}{suffix_full}.mp4"
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(str(output_path), fourcc, fps, out_size)
-        output_paths.append(output_path)
-        
-        print(f"  Saving to: {output_path}")
-        
-        # Use tqdm for progress bar
-        frames_to_process = end_frame - start_frame + 1
+            df_window['frame'] = pd.to_numeric(df_window['frame'], errors='coerce').astype('Int64')
+            df_window = df_window.dropna(subset=['frame'])
+            row_map = df_window.set_index('frame').to_dict('index')
+            valid_frames = sorted(row_map.keys())
+            if not valid_frames:
+                print(f"  ⚠️ Window {window_label}: no valid frames with centroid, skipping")
+                continue
 
-        # Precompute marker window for this video if applicable
-        mark_window = None
-        if mark_ts_abs is not None:
-            mark_window = (mark_ts_abs, mark_ts_abs + pd.Timedelta(seconds=2.0))
+            start_frame = int(valid_frames[0])
+            end_frame = int(valid_frames[-1])
 
-        with tqdm(total=frames_to_process, desc="  Encoding", unit="frames") as pbar:
-            current_frame = start_frame
-            while current_frame <= end_frame:
-                ret, frame = cap.read()
-                if not ret:
-                    break
+            # Load video with OpenCV for frame-by-frame processing
+            cap = cv2.VideoCapture(str(video_path))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
-                # Rotate raw frame first so overlays align post-rotation
-                frame = rotate_frame(frame, rotate_deg)
+            # Rotation-aware output size
+            if rotate_deg in (90, 270):
+                out_size = (height, width)
+            else:
+                out_size = (width, height)
 
-                # Determine dimensions after rotation
-                frame_h, frame_w = frame.shape[:2]
+            suffix_full = "_full" if window is None else f"_window{window_idx}"
+            output_path = results_dir / f"{output_suffix}_rotdeg_{rotate_deg}_video{video_num}{suffix_full}.mp4"
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(str(output_path), fourcc, fps, out_size)
+            output_paths.append(output_path)
 
-                # Convert BGR to RGB for PIL
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frame_pil = Image.fromarray(frame_rgb)
-                draw = ImageDraw.Draw(frame_pil)
+            print(f"  Saving to: {output_path}")
 
-                row = row_map.get(current_frame)
+            frames_to_process = end_frame - start_frame + 1
 
-                # Plot centroid if available for this frame
-                if row is not None and not pd.isna(row.get('centroid_x')) and not pd.isna(row.get('centroid_y')):
-                    cx_raw = row['centroid_x']
-                    cy_raw = row['centroid_y']
-                    cx_rot, cy_rot = rotate_point(cx_raw, cy_raw, width, height, rotate_deg)
-                    cx, cy = int(cx_rot), int(cy_rot)
-                    draw.ellipse([cx - centroid_radius, cy - centroid_radius,
-                                 cx + centroid_radius, cy + centroid_radius],
-                                fill=centroid_color, outline=centroid_color)
+            mark_window = None
+            if mark_ts_abs is not None:
+                mark_window = (mark_ts_abs, mark_ts_abs + pd.Timedelta(seconds=2.0))
 
-                # Odor overlay (text only, neon red); hidden when no odor
-                frame_time = pd.to_datetime(row.get('time')) if (row is not None and 'time' in row) else None
-                odor_label = None
-                if frame_time is not None and valve_events:
-                    odor_label = lookup_odor(frame_time.to_datetime64())
+            with tqdm(total=frames_to_process, desc="  Encoding", unit="frames") as pbar:
+                current_frame = start_frame
+                while current_frame <= end_frame:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
 
-                if odor_label:
-                    display_odor = re.sub(r"(?i)^odor[_\-\s]*", "", str(odor_label)) or str(odor_label)
-                    odor_text = f"Odor: {display_odor}"
-                    # Anchor in unrotated coords then rotate anchor point
-                    anchor_x_raw = width // 2
-                    anchor_y_raw = 30
-                    anchor_x, anchor_y = rotate_point(anchor_x_raw, anchor_y_raw, width, height, rotate_deg)
+                    frame = rotate_frame(frame, rotate_deg)
+                    frame_h, frame_w = frame.shape[:2]
 
-                    # If rotated 90°, nudge left/up to keep on-screen
-                    if rotate_deg == 90:
-                        anchor_x -= 185
-                        anchor_y -= 30
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    frame_pil = Image.fromarray(frame_rgb)
+                    draw = ImageDraw.Draw(frame_pil)
 
-                    draw.text((anchor_x, anchor_y), odor_text, fill=(255, 40, 90), font=font_small)
+                    row = row_map.get(current_frame)
 
-                # Reward overlays (text only, green) shown when supply ports pulse (1s duration)
-                active_ports = set()
-                if frame_time is not None and supply_events:
-                    active_ports = {
-                        ev['port'] for ev in supply_events
-                        if ev['start_time'] <= frame_time <= ev['end_time']
-                    }
+                    if row is not None and not pd.isna(row.get('centroid_x')) and not pd.isna(row.get('centroid_y')):
+                        cx_raw = row['centroid_x']
+                        cy_raw = row['centroid_y']
+                        cx_rot, cy_rot = rotate_point(cx_raw, cy_raw, width, height, rotate_deg)
+                        cx, cy = int(cx_rot), int(cy_rot)
+                        draw.ellipse([cx - centroid_radius, cy - centroid_radius,
+                                     cx + centroid_radius, cy + centroid_radius],
+                                    fill=centroid_color, outline=centroid_color)
 
-                if active_ports:
-                    reward_text = "Reward"
-                    reward_color = (0, 220, 0)
-                    x_offset = 140  # pull toward center
-                    y_offset = 5    # bind very close to bottom edge
+                    frame_time = pd.to_datetime(row.get('time')) if (row is not None and 'time' in row) else None
+                    odor_label = None
+                    if frame_time is not None and valve_events:
+                        odor_label = lookup_odor(frame_time.to_datetime64())
 
-                    # Add extra bottom padding when unrotated
-                    if rotate_deg == 0:
-                        y_offset = 40
-
-                    bbox_reward = draw.textbbox((0, 0), reward_text, font=font_small)
-                    text_h = bbox_reward[3] - bbox_reward[1]
-
-                    # SupplyPort2 -> left (0°) / top (90°)
-                    if 2 in active_ports:
-                        bl_x_raw = x_offset
-                        bl_y_raw = height - y_offset - text_h
-                        bl_x, bl_y = rotate_point(bl_x_raw, bl_y_raw, width, height, rotate_deg)
-                        draw.text((bl_x, bl_y), reward_text, fill=reward_color, font=font_small)
-
-                    # SupplyPort1 -> right (0°) / bottom (90°)
-                    if 1 in active_ports:
-                        br_x_raw = width - (x_offset + 230)
-                        br_y_raw = height - y_offset - text_h 
-                        br_x, br_y = rotate_point(br_x_raw, br_y_raw, width, height, rotate_deg)
-                        draw.text((br_x, br_y), reward_text, fill=reward_color, font=font_small)
+                    if odor_label:
+                        display_odor = re.sub(r"(?i)^odor[_\-\s]*", "", str(odor_label)) or str(odor_label)
+                        odor_text = f"Odor: {display_odor}"
+                        anchor_x_raw = width // 2
+                        anchor_y_raw = 30
+                        anchor_x, anchor_y = rotate_point(anchor_x_raw, anchor_y_raw, width, height, rotate_deg)
 
                         if rotate_deg == 90:
-                            br_y -= 20
+                            anchor_x -= 185
+                            anchor_y -= 30
 
-                # Mark specific timepoint with a downward green triangle for 2 seconds
-                if mark_window and frame_time is not None:
-                    if mark_window[0] <= frame_time <= mark_window[1]:
-                        cx = frame_w // 2
-                        cy = frame_h // 2
-                        tri = [(cx - 60, cy - 40), (cx + 60, cy - 40), (cx, cy + 40)]
-                        draw.polygon(tri, fill=(0, 200, 0))
+                        draw.text((anchor_x, anchor_y), odor_text, fill=(255, 40, 90), font=font_small)
 
-                # Convert back to BGR for OpenCV
-                frame_annotated = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
-                out.write(frame_annotated)
+                    active_ports = set()
+                    if frame_time is not None and supply_events:
+                        active_ports = {
+                            ev['port'] for ev in supply_events
+                            if ev['start_time'] <= frame_time <= ev['end_time']
+                        }
 
-                current_frame += 1
-                pbar.update(1)
-        
-        cap.release()
-        out.release()
-        
-        print(f"  ✓ Completed!")
+                    if active_ports:
+                        reward_text = "Reward"
+                        reward_color = (0, 220, 0)
+                        x_offset = 140
+                        y_offset = 5
+
+                        if rotate_deg == 0:
+                            y_offset = 40
+
+                        bbox_reward = draw.textbbox((0, 0), reward_text, font=font_small)
+                        text_h = bbox_reward[3] - bbox_reward[1]
+
+                        if 2 in active_ports:
+                            bl_x_raw = x_offset
+                            bl_y_raw = height - y_offset - text_h
+                            bl_x, bl_y = rotate_point(bl_x_raw, bl_y_raw, width, height, rotate_deg)
+                            draw.text((bl_x, bl_y), reward_text, fill=reward_color, font=font_small)
+
+                        if 1 in active_ports:
+                            br_x_raw = width - (x_offset + 230)
+                            br_y_raw = height - y_offset - text_h 
+                            br_x, br_y = rotate_point(br_x_raw, br_y_raw, width, height, rotate_deg)
+                            draw.text((br_x, br_y), reward_text, fill=reward_color, font=font_small)
+
+                            if rotate_deg == 90:
+                                br_y -= 20
+
+                    if mark_window and frame_time is not None:
+                        if mark_window[0] <= frame_time <= mark_window[1]:
+                            cx = frame_w // 2
+                            cy = frame_h // 2
+                            tri = [(cx - 60, cy - 40), (cx + 60, cy - 40), (cx, cy + 40)]
+                            draw.polygon(tri, fill=(0, 200, 0))
+
+                    frame_annotated = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
+                    out.write(frame_annotated)
+
+                    current_frame += 1
+                    pbar.update(1)
+
+            cap.release()
+            out.release()
+
+            print(f"  ✓ Completed {window_label}!")
     
     print(f"\n✅ All videos processed and saved!")
     return output_paths
