@@ -16,8 +16,8 @@ conda activate sleap-gpu 2>/dev/null || conda activate sleap
 # DEFAULT CONFIGURATION
 # ======================================
 
-DEFAULT_MODEL="C:/Users/HarrisLab/Desktop/Repos/sleap-models/sleap_v1.5.5_new_model/models/run_trial2_251205_181823.single_instance.n=150"
-DEFAULT_BASE_DIR="Z:/hypnose"
+DEFAULT_MODEL="C:/Users/HarrisLab/Desktop/Repos/sleap-models/sleap_v1.5.5_new_model/models/260305_143707.single_instance.n=340"
+DEFAULT_BASE_DIR="E:"
 DEFAULT_DERIV_DIR="${DEFAULT_BASE_DIR}/derivatives"
 DEFAULT_BATCH_SIZE=64
 VIDEO_EXTENSIONS="*.avi"
