@@ -37,7 +37,7 @@ In GitBash Terminal run: $ bash run_sleap_inference_local_windows.sh -s XX -b E:
 
 
 ### Arguments
-- `-s, --subject <SUBJ ...>`: One or more subject IDs (e.g., `40` or `038`). Padding to three digits is handled internally.
+- `-s, --subject <SUBJ ...>`: One or more subject IDs (e.g., `40` or `038`). Padding to three digits is handled internally. Repeat -s for each subject (-s 38 -s 40)
 - `-d, --date <DATE|DATE_RANGE ...>`: Zero or more dates. Accepts `YYYYMMDD` or ranges `YYYYMMDD-YYYYMMDD` (inclusive). If omitted, the script discovers all dates present for each subject under `<BASE_DIR>/rawdata/sub-XXX_*`.
 - `-m, --model <PATH>`: Override model path.
 - `-b, --base-dir <PATH>`: Override base data root (expects `rawdata/...`).
