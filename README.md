@@ -20,6 +20,10 @@ sudo ln -s ~/path/to/directory/run_sleap_inference_local.sh /usr/local/bin/run_s
 
 Adjust Base Directory and Model Path to your directory
 
+## Convert videos from .avi to .mp4 for SLEAP (model training and labeling)
+
+
+
 ## Run Inference
 
 run_sleap_inference_local -s XXX -d YYYYMMDD 
