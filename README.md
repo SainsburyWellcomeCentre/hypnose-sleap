@@ -22,7 +22,12 @@ Adjust Base Directory and Model Path to your directory
 
 ## Convert videos from .avi to .mp4 for SLEAP (model training and labeling)
 
-
+On Analysis PC, powershell automatically loads the conversion script via the PowerShell Profile
+- To configure or change path, run 'notepad $PROFILE' and update path to the file. Refresh profile with '. $PROFILE' or restart powershell
+- Once configured, the function is available from anywhere in PowerShell
+- Run convert-avitomp4 "file\path\to\file.avi". Works with single or multiple files ("file\one.avi" "file\two.avi")
+- Outputs are currently written to E:\videos_sleap_models
+- Encoding uses NVIDIA NVENC (h264_nvenc, preset p7, CQ18)
 
 ## Run Inference
 
