@@ -6,27 +6,193 @@ from pathlib import Path
 import json
 import gc
 from typing import Dict, Iterable, List, Optional, Tuple, Union
-from hypnose_analysis.paths import get_derivatives_root, get_data_root
-from hypnose_analysis.utils.classification_utils import load_all_streams, load_odor_mapping
-from hypnose_analysis.utils.metrics_utils import load_session_results
-from hypnose_analysis.utils.visualization_utils import _get_from_cache, _update_cache
+from hypnose.io.paths import get_derivatives_root, get_data_root
+from hypnose.trial_classification.classification_utils import load_all_streams, load_odor_mapping
+from hypnose.metric_analysis.metrics_utils import load_session_results
+from hypnose.utils.helpers import _get_from_cache, _update_cache
+
+
+def _read_table(path: Union[str, Path]) -> pd.DataFrame:
+    """Read a tracking table from .parquet or .csv.
+
+    Parquet preserves dtypes (tz-aware datetimes, nullable Int64) natively, so no
+    re-parsing is needed. CSV keeps the historical utf-8/latin1 fallback.
+    """
+    path = Path(path)
+    if path.suffix == ".parquet":
+        return pd.read_parquet(path)
+    try:
+        return pd.read_csv(path, encoding="utf-8")
+    except UnicodeDecodeError:
+        return pd.read_csv(path, encoding="latin1")
+
+
+def _peek_video_file(path: Union[str, Path]) -> Optional[str]:
+    """Return the first 'video_file' value from a tracking table, or None."""
+    path = Path(path)
+    try:
+        if path.suffix == ".parquet":
+            df = pd.read_parquet(path, columns=["video_file"])
+        else:
+            df = pd.read_csv(path, nrows=1)
+        if "video_file" in df.columns and len(df) and pd.notna(df.iloc[0]["video_file"]):
+            return str(df.iloc[0]["video_file"])
+    except Exception:
+        pass
+    return None
+
+
+def _find_tracking_files(results_dir: Path) -> List[Path]:
+    """Find per-video sleap tracking files, preferring .parquet over .csv per stem."""
+    by_stem: Dict[str, Path] = {}
+    for ext in ("parquet", "csv"):  # parquet first so it wins for a given stem
+        for f in sorted(results_dir.glob(f"sleap_tracking_video*.{ext}")):
+            if f.name.startswith("._"):
+                continue
+            by_stem.setdefault(f.stem, f)
+    return sorted(by_stem.values(), key=lambda p: p.name)
+
+
+def _find_combined_file(results_dir: Path) -> Optional[Path]:
+    """Find the combined timestamps file, preferring .parquet over .csv."""
+    for ext in ("parquet", "csv"):
+        matches = [m for m in sorted(results_dir.glob(f"*_combined_sleap_tracking_timestamps.{ext}"))
+                   if not m.name.startswith("._")]
+        if matches:
+            return matches[0]
+    return None
+
+
+def _resolve_deriv_root(base_dir: Optional[Union[str, Path]]) -> Path:
+    """Resolve the derivatives root from an optional base directory."""
+    if base_dir:
+        candidate = Path(base_dir).expanduser().resolve()
+        if candidate.name != "derivatives" and (candidate / "derivatives").exists():
+            return (candidate / "derivatives").resolve()
+        return candidate
+    return get_derivatives_root()
+
+
+def _available_sessions(deriv_root: Path, subjid: int) -> Dict[str, Path]:
+    """Return {date_str: session_dir} for a subject, or {} if the subject is missing."""
+    subj_dirs = sorted(deriv_root.glob(f"sub-{int(subjid):03d}_id-*"))
+    if not subj_dirs:
+        return {}
+    sessions: Dict[str, Path] = {}
+    for ses_dir in subj_dirs[0].glob("ses-*_date-*"):
+        m = re.search(r"date-(\d+)$", ses_dir.name)
+        if m:
+            sessions[m.group(1)] = ses_dir
+    return sessions
+
+
+def _normalize_date_arg(date_input, available: List[str]) -> List[str]:
+    """Expand a date argument (None | single | list | (start, end) range) to a sorted
+    list of available date strings. Mirrors the convention used elsewhere in the repo."""
+    if date_input is None:
+        return sorted(available)
+
+    if isinstance(date_input, tuple) and len(date_input) == 2:
+        start_dt = pd.to_datetime(str(date_input[0]), format="%Y%m%d", errors="coerce")
+        end_dt = pd.to_datetime(str(date_input[1]), format="%Y%m%d", errors="coerce")
+        if pd.isna(start_dt) or pd.isna(end_dt) or end_dt < start_dt:
+            return []
+        wanted = [d.strftime("%Y%m%d") for d in pd.date_range(start_dt, end_dt, freq="D")]
+    elif isinstance(date_input, (list, set, tuple)):
+        wanted = [str(d) for d in date_input]
+    else:
+        wanted = [str(date_input)]
+
+    return sorted([d for d in wanted if d in available])
+
+
+def _compute_session_centroid(df: pd.DataFrame, selected_nodes: List[str],
+                              score_thresh: float, gap_limit: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Confidence-gate, gap-limited interpolate, then average the selected nodes to a centroid.
+
+    Steps (per instance/track, in frame order):
+      1. Mask each node's (x, y) to NaN where the point is absent or its score < score_thresh.
+      2. Interpolate each node across internal gaps up to gap_limit *frames* (no extrapolation).
+      3. Centroid = mean over selected nodes; NaN only when all selected nodes are absent.
+
+    Returns (centroid_x, centroid_y) aligned to df rows. df must have a 0..n-1 RangeIndex.
+    """
+    n = len(df)
+    cx = np.full(n, np.nan)
+    cy = np.full(n, np.nan)
+    xcols = [f"{node}_x" for node in selected_nodes]
+    ycols = [f"{node}_y" for node in selected_nodes]
+
+    for _, g in df.groupby("instance", sort=False):
+        pos = g.index.to_numpy()               # positions into df (RangeIndex)
+        frames = g["frame"].to_numpy(dtype=float)
+        if frames.size == 0 or np.isnan(frames).all():
+            continue
+
+        data: Dict[str, np.ndarray] = {}
+        for node in selected_nodes:
+            x = g[f"{node}_x"].to_numpy(dtype=float).copy()
+            y = g[f"{node}_y"].to_numpy(dtype=float).copy()
+            scol = f"{node}_score"
+            if scol in g.columns:
+                s = g[scol].to_numpy(dtype=float)
+                mask = np.isnan(x) | np.isnan(y) | ~(s >= score_thresh)
+            else:
+                mask = np.isnan(x) | np.isnan(y)
+            x[mask] = np.nan
+            y[mask] = np.nan
+            data[f"{node}_x"] = x
+            data[f"{node}_y"] = y
+
+        fint = frames.astype(np.int64)
+        sub = pd.DataFrame(data, index=fint)
+        # Reindex onto a contiguous frame grid so the gap limit counts real frames,
+        # interpolate short internal gaps only, then restrict back to observed frames.
+        full = np.arange(int(fint.min()), int(fint.max()) + 1)
+        filled = (sub.reindex(full)
+                     .interpolate(method="index", limit=gap_limit, limit_area="inside")
+                     .loc[fint])
+
+        with np.errstate(invalid="ignore"):
+            gx = np.nanmean(filled[xcols].to_numpy(dtype=float), axis=1)
+            gy = np.nanmean(filled[ycols].to_numpy(dtype=float), axis=1)
+        cx[pos] = gx
+        cy[pos] = gy
+
+    return cx, cy
+
 
 def sleap_labels_and_centroid(
     subjid,
     date,
     base_dir=None,
-    core_nodes=None,
+    node_pool=None,
     skip_empty: bool = False,
-    anchor_threshold: Optional[float] = 150.0,
+    score_thresh: float = 0.4,
+    presence_frac: float = 0.7,
+    gap_limit: int = 120,
 ):
     """
-    Load all .slp files for a subject/date, flatten every frame/instance to CSV,
-    and append per-frame centroids from available core nodes.
-    Centroid uses an anchor-based filter: nodes farther than `anchor_threshold`
-    pixels from the previous centroid are ignored until they re-enter the window
-    (set anchor_threshold=None to disable filtering).
-    Returns a list of saved CSV paths.
-    If skip_empty is True, files with no pose data (or unreadable .slp) are skipped instead of raising.
+    Load all .slp files for a subject/date, flatten every frame/instance to a parquet
+    table, and append a per-frame centroid computed with a robust, session-consistent
+    pipeline:
+
+      1. Confidence gate  - points with score < `score_thresh` are treated as missing.
+      2. Node selection   - a single node set is chosen for the whole session: nodes
+                            present (after gating) in >= `presence_frac` of *occupied*
+                            frames (frames with >=1 node). Selection is drawn from
+                            `node_pool` (default: all skeleton nodes), so it adapts to
+                            whatever nodes a given model tracks.
+      3. Interpolation    - each selected node's internal gaps up to `gap_limit` frames
+                            are linearly interpolated (no extrapolation); longer gaps
+                            (e.g. the animal off-screen) stay NaN.
+      4. Centroid         - mean of the selected nodes per frame. Because the node set
+                            is fixed and short gaps are filled, the centroid does not
+                            jump when an individual node flickers in and out.
+
+    The selected node set is recorded per output in a `centroid_nodes` column for QC.
+    Returns a list of saved parquet paths. If skip_empty is True, files with no pose
+    data (or unreadable .slp) are skipped instead of raising.
     """
 
     nan = float("nan")
@@ -161,15 +327,7 @@ def sleap_labels_and_centroid(
         except Exception:
             return nan
 
-    core_nodes = core_nodes or [
-        "right_ear",
-        "left_ear",
-        "center_head",
-        "neck",
-        "center",
-        "center_back",
-        "tail_base",
-    ]
+    node_pool_set = set(node_pool) if node_pool else None
 
     deriv_dir = resolve_deriv_root()
     if not deriv_dir.exists():
@@ -200,14 +358,19 @@ def sleap_labels_and_centroid(
     for i, f in enumerate(slp_files, 1):
         print(f"  {i}. {f.name}")
 
-    default_nodes = []
+    default_nodes: List[str] = []
+    session_nodes: List[str] = []
 
-    outputs = []
+    # ----- Pass 1: load every video, flatten to a table, accumulate presence stats -----
+    per_video: List[Tuple[int, Path, str, pd.DataFrame]] = []
+    present_counts: Dict[str, int] = {}
+    occupied_total = 0
+
     for video_number, slp_path in enumerate(slp_files, 1):
         video_file_basename = infer_video_file_from_slp(slp_path)
         safe_tag = video_file_basename.replace(".avi", "")
-        output_path = results_dir / f"sleap_tracking_video{video_number}_{safe_tag}.csv"
-        print(f"\n[{video_number}/{len(slp_files)}] Processing: {slp_path.name}")
+        output_path = results_dir / f"sleap_tracking_video{video_number}_{safe_tag}.parquet"
+        print(f"\n[{video_number}/{len(slp_files)}] Reading: {slp_path.name}")
 
         labels = None
         try:
@@ -259,62 +422,63 @@ def sleap_labels_and_centroid(
         df.sort_values(["frame", "instance"], inplace=True)
         df.reset_index(drop=True, inplace=True)
 
-        centroid_x_cols = [f"{node}_x" for node in core_nodes if f"{node}_x" in df.columns]
-        centroid_y_cols = [f"{node}_y" for node in core_nodes if f"{node}_y" in df.columns]
-        available_nodes = [node for node in core_nodes if f"{node}_x" in df.columns]
+        if not session_nodes:
+            session_nodes = ([n for n in default_nodes if f"{n}_x" in df.columns]
+                             or [c[:-2] for c in df.columns if c.endswith("_x")])
 
-        if centroid_x_cols and centroid_y_cols:
-            xs = df[centroid_x_cols].to_numpy(dtype=float)
-            ys = df[centroid_y_cols].to_numpy(dtype=float)
+        # Accumulate confidence-gated presence for session-level node selection.
+        # "occupied" = frames where >=1 node is present (i.e. the animal is on screen).
+        node_masks = []
+        for node in session_nodes:
+            xcol, ycol, scol = f"{node}_x", f"{node}_y", f"{node}_score"
+            if xcol not in df.columns or ycol not in df.columns:
+                continue
+            m = ~np.isnan(df[xcol].to_numpy(dtype=float)) & ~np.isnan(df[ycol].to_numpy(dtype=float))
+            if scol in df.columns:
+                m &= df[scol].to_numpy(dtype=float) >= score_thresh
+            present_counts[node] = present_counts.get(node, 0) + int(m.sum())
+            node_masks.append(m)
+        if node_masks:
+            occupied_total += int(np.any(np.vstack(node_masks), axis=0).sum())
 
-            n_frames = len(df)
-            centroid_x_out = np.full(n_frames, np.nan)
-            centroid_y_out = np.full(n_frames, np.nan)
-            nodes_used: List[str] = [""] * n_frames
+        per_video.append((video_number, output_path, video_file_basename, df))
+        print(f"    {len(df)} rows, frames {int(df['frame'].min())}-{int(df['frame'].max())}")
 
-            anchor_x = np.nan
-            anchor_y = np.nan
-
-            for i in range(n_frames):
-                row_x = xs[i]
-                row_y = ys[i]
-
-                valid_mask = ~np.isnan(row_x) & ~np.isnan(row_y)
-
-                if anchor_threshold is not None and not np.isnan(anchor_x) and valid_mask.any():
-                    dist = np.sqrt((row_x - anchor_x) ** 2 + (row_y - anchor_y) ** 2)
-                    within_mask = valid_mask & (dist <= float(anchor_threshold))
-                else:
-                    within_mask = valid_mask
-
-                if within_mask.any():
-                    cx = float(np.nanmean(row_x[within_mask]))
-                    cy = float(np.nanmean(row_y[within_mask]))
-                    centroid_x_out[i] = cx
-                    centroid_y_out[i] = cy
-                    anchor_x = cx
-                    anchor_y = cy
-                    nodes_used[i] = ";".join(np.array(available_nodes)[within_mask])
-                else:
-                    nodes_used[i] = ""
-
-            df["centroid_x"] = centroid_x_out
-            df["centroid_y"] = centroid_y_out
-            df["nodes_for_centroid"] = nodes_used
-        else:
-            df["centroid_x"] = pd.NA
-            df["centroid_y"] = pd.NA
-            df["nodes_for_centroid"] = ""
-
-        df.to_csv(output_path, index=False)
-
-        outputs.append(output_path)
-        print(f"  ✓ Saved to: {output_path.name}")
-        print(f"    Total rows: {len(df)}")
-        print(f"    Frame range: {int(df['frame'].min())} to {int(df['frame'].max())}")
-
-    if not outputs:
+    if not per_video:
         raise ValueError("No pose data found in any .slp files for this session")
+
+    # ----- Session-level node selection -----
+    pool = [n for n in session_nodes if node_pool_set is None or n in node_pool_set]
+    selected_nodes = [
+        n for n in pool
+        if occupied_total > 0 and present_counts.get(n, 0) / occupied_total >= presence_frac
+    ]
+    if not selected_nodes:
+        selected_nodes = [n for n in pool if present_counts.get(n, 0) > 0]
+        print("  ⚠️ No nodes met presence_frac; falling back to all nodes with any detections")
+    if not selected_nodes:
+        raise ValueError("No nodes with valid detections available for centroid computation")
+
+    print(f"\nSession node selection (score>={score_thresh}, presence>={presence_frac:.0%} of "
+          f"{occupied_total:,} occupied frames):")
+    for n in pool:
+        frac = present_counts.get(n, 0) / occupied_total if occupied_total else 0.0
+        print(f"    {'[x]' if n in selected_nodes else '[ ]'} {n:<14} {frac:6.1%}")
+    print(f"  Centroid nodes: {', '.join(selected_nodes)}")
+
+    # ----- Pass 2: confidence gate + gap-limited interpolation + centroid, then write -----
+    centroid_nodes_str = ";".join(selected_nodes)
+    outputs = []
+    for video_number, output_path, video_file_basename, df in per_video:
+        cx, cy = _compute_session_centroid(df, selected_nodes, score_thresh, gap_limit)
+        df["centroid_x"] = cx
+        df["centroid_y"] = cy
+        df["centroid_nodes"] = centroid_nodes_str
+
+        df.to_parquet(output_path, index=False)
+        outputs.append(output_path)
+        n_centroid = int(np.count_nonzero(~np.isnan(cx)))
+        print(f"  ✓ Saved {output_path.name}: {len(df)} rows, {n_centroid} frames with centroid")
 
     print("\n✅ All videos processed!")
     return outputs
@@ -434,10 +598,9 @@ def add_timestamps_to_sleap_tracking(subjid, date, save_output=True):
     if not results_dir.exists():
         raise FileNotFoundError(f"Results directory not found: {results_dir}")
     
-    tracking_csvs = sorted([f for f in results_dir.glob("sleap_tracking_video*.csv") 
-                           if not f.name.startswith('._')])
+    tracking_csvs = _find_tracking_files(results_dir)
     if not tracking_csvs:
-        raise FileNotFoundError(f"No sleap_tracking_videox.csv files found in {results_dir}")
+        raise FileNotFoundError(f"No sleap_tracking_video* files (.parquet/.csv) found in {results_dir}")
     
     print(f"Found {len(tracking_csvs)} SLEAP tracking file(s)")
     
@@ -493,16 +656,10 @@ def add_timestamps_to_sleap_tracking(subjid, date, save_output=True):
     
     for csv_path in tracking_csvs:
         # Try to extract mapping hints
-        video_file_hint = None
-        try:
-            df_head = pd.read_csv(csv_path, nrows=1)
-            if "video_file" in df_head.columns and pd.notna(df_head.loc[0, "video_file"]):
-                video_file_hint = str(df_head.loc[0, "video_file"])
-        except Exception:
-            pass
+        video_file_hint = _peek_video_file(csv_path)
 
         name_hint = None
-        m_name = re.search(r"sleap_tracking_video\d+_(.+)\.csv", csv_path.name)
+        m_name = re.search(r"sleap_tracking_video\d+_(.+)\.(?:csv|parquet)", csv_path.name)
         if m_name:
             name_hint = m_name.group(1)
             if not name_hint.endswith(".avi"):
@@ -541,10 +698,7 @@ def add_timestamps_to_sleap_tracking(subjid, date, save_output=True):
     all_tracking = []
     
     for video_file, csv_path in sleap_video_mapping.items():
-        try:
-            tracking_df = pd.read_csv(csv_path, encoding='utf-8')
-        except UnicodeDecodeError:
-            tracking_df = pd.read_csv(csv_path, encoding='latin1')
+        tracking_df = _read_table(csv_path)
         
         # Get frame times for this specific video
         video_frames = frames_by_video.get(video_file, pd.DataFrame()).copy()
@@ -595,9 +749,9 @@ def add_timestamps_to_sleap_tracking(subjid, date, save_output=True):
     
     # Save output
     if save_output:
-        output_filename = f"sub-{str(subjid).zfill(3)}_ses-{date_str}_combined_sleap_tracking_timestamps.csv"
+        output_filename = f"sub-{str(subjid).zfill(3)}_ses-{date_str}_combined_sleap_tracking_timestamps.parquet"
         output_path = results_dir / output_filename
-        combined.to_csv(output_path, index=False)
+        combined.to_parquet(output_path, index=False)
         print(f"\nSaved: {output_path}")
     
     if 'time' in combined.columns and combined['time'].notna().any():
@@ -830,11 +984,11 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
         supply_events = cached.get("supply_events")
 
     if combined_df is None:
-        combined_ts_file = list(results_dir.glob("*_combined_sleap_tracking_timestamps.csv"))
-        if not combined_ts_file:
+        combined_ts_file = _find_combined_file(results_dir)
+        if combined_ts_file is None:
             raise FileNotFoundError(f"No combined timestamps file found in {results_dir}")
 
-        combined_df = pd.read_csv(combined_ts_file[0])
+        combined_df = _read_table(combined_ts_file)
         combined_df["video_file"] = combined_df["video_file"].astype(str)
         print(f"Loaded combined timestamps: {len(combined_df)} frames")
     else:
@@ -1144,9 +1298,11 @@ def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_su
 def process_sleap_sessions(subjid: Union[int, Iterable[int]],
                            date: Optional[Union[int, Iterable[int], Tuple[int, int]]] = None,
                            base_dir: Optional[Union[str, Path]] = None,
-                           core_nodes: Optional[List[str]] = None,
+                           node_pool: Optional[List[str]] = None,
                            save_output: bool = True,
-                           anchor_threshold: Optional[float] = None,
+                           score_thresh: float = 0.4,
+                           presence_frac: float = 0.7,
+                           gap_limit: int = 120,
                            recompute: bool = False) -> Dict[int, Dict[str, List[Tuple[str, str]]]]:
     """
     Wrapper to run SLEAP centroid extraction and timestamp merging across subjects/dates.
@@ -1160,12 +1316,13 @@ def process_sleap_sessions(subjid: Union[int, Iterable[int]],
         available dates for each subject.
     base_dir : str | Path | None
         Optional base directory. If provided, will try <base_dir>/derivatives for SLEAP files.
-    core_nodes : list[str] | None
+    node_pool : list[str] | None
+        Candidate nodes to select the centroid from (default: all skeleton nodes).
         Forwarded to sleap_labels_and_centroid.
     save_output : bool
         Forwarded to add_timestamps_to_sleap_tracking.
-    anchor_threshold : float | None
-        Forwarded to sleap_labels_and_centroid.
+    score_thresh, presence_frac, gap_limit :
+        Centroid pipeline parameters, forwarded to sleap_labels_and_centroid.
     recompute : bool
         If False (default), skip sessions where the combined timestamps CSV already exists.
         If True, always recompute even when outputs are present.
@@ -1230,7 +1387,7 @@ def process_sleap_sessions(subjid: Union[int, Iterable[int]],
         return sorted(normalized), skipped_local
 
     def count_tracking_files(results_dir: Path) -> int:
-        return len([f for f in results_dir.glob("sleap_tracking_video*.csv") if not f.name.startswith("._")])
+        return len(_find_tracking_files(results_dir))
 
     def process_single(subj: int, date_str: str, session_dir: Path, results_dir: Path, centroid_found: int):
         messages = [f"\nSubject {subj:02d} Date {date_str} - Processing SLEAP Output:"]
@@ -1240,15 +1397,16 @@ def process_sleap_sessions(subjid: Union[int, Iterable[int]],
         saved_flag = False
 
         try:
-            outputs = sleap_labels_and_centroid(subj, int(date_str), base_dir=base_dir, core_nodes=core_nodes, skip_empty=True, anchor_threshold=anchor_threshold)
+            outputs = sleap_labels_and_centroid(subj, int(date_str), base_dir=base_dir, node_pool=node_pool,
+                                                skip_empty=True, score_thresh=score_thresh,
+                                                presence_frac=presence_frac, gap_limit=gap_limit)
             centroid_done = len(outputs)
             timestamp_found = count_tracking_files(results_dir)
 
             combined = add_timestamps_to_sleap_tracking(subj, int(date_str), save_output=save_output)
             if combined is not None and not combined.empty:
                 matched_videos = combined["video_file"].nunique()
-            output_filename = f"sub-{subj:03d}_ses-{date_str}_combined_sleap_tracking_timestamps.csv"
-            saved_flag = (results_dir / output_filename).exists()
+            saved_flag = _find_combined_file(results_dir) is not None
 
             messages.append(f"Centroid Processing: found {centroid_found} video(s) to process.")
             messages.append(f"        Successfully processed {centroid_done} videos.")
@@ -1292,8 +1450,7 @@ def process_sleap_sessions(subjid: Union[int, Iterable[int]],
                 print(f"Subject {subj:02d} Date {date_str}: results directory missing, skipping")
                 continue
 
-            combined_path = results_dir / f"sub-{subj:03d}_ses-{date_str}_combined_sleap_tracking_timestamps.csv"
-            if combined_path.exists() and not recompute:
+            if _find_combined_file(results_dir) is not None and not recompute:
                 summary[subj]["skipped"].append((date_str, "Existing combined tracking file, skipping directory"))
                 print(f"Subject {subj:02d} Date {date_str} - Existing combined tracking file, skipping directory (recompute=False)")
                 continue
@@ -1328,3 +1485,148 @@ def process_sleap_sessions(subjid: Union[int, Iterable[int]],
         print(f"    Skipped: {len(stats['skipped'])}/{total}")
 
     return summary
+
+
+def sleap_node_quality_report(subjid: int,
+                              date: Optional[Union[int, Iterable[int], Tuple[int, int]]] = None,
+                              base_dir: Optional[Union[str, Path]] = None,
+                              score_thresh: float = 0.4,
+                              presence_frac: float = 0.7,
+                              verbose: bool = True) -> pd.DataFrame:
+    """
+    Per-node tracking-quality report for one subject across one or more sessions.
+
+    For every skeleton node it reports how often the node is present, its confidence-score
+    distribution, and whether it would be selected for the centroid at the given thresholds.
+    Handy for judging whether a new SLEAP model tracks better than an old one.
+
+    Parameters
+    ----------
+    subjid : int
+        Subject id.
+    date : int | list[int] | (start, end) tuple | None
+        Session date(s). None => all available sessions for the subject. A 2-tuple is an
+        inclusive (start, end) range; a list/set is treated as explicit dates.
+    base_dir : str | Path | None
+        Optional base directory (tries <base_dir>/derivatives).
+    score_thresh : float
+        A point counts as confident when its score >= this (drives `pres_pct_occ_gated`
+        and `selected`).
+    presence_frac : float
+        Gated presence (of occupied frames) required for a node to be marked `selected`.
+    verbose : bool
+        Print a formatted table per session.
+
+    Returns
+    -------
+    pd.DataFrame with one row per (date, node):
+        subject, date, node, n_frames, n_occupied, pres_pct_all, pres_pct_occ,
+        pres_pct_occ_gated, avg_score, score_p10, score_p25, score_p50, score_p75,
+        score_p90, selected
+    """
+    deriv_root = _resolve_deriv_root(base_dir)
+    sessions = _available_sessions(deriv_root, int(subjid))
+    if not sessions:
+        raise FileNotFoundError(f"No subject directory found for sub-{int(subjid):03d} under {deriv_root}")
+
+    dates = _normalize_date_arg(date, list(sessions.keys()))
+    if not dates:
+        raise FileNotFoundError("No matching sessions found for the requested date(s)")
+
+    records: List[dict] = []
+
+    for date_str in dates:
+        results_dir = sessions[date_str] / "saved_analysis_results"
+        slp_files = sorted(p for p in results_dir.glob("*.slp") if not p.name.startswith("._"))
+        if not slp_files:
+            if verbose:
+                print(f"{date_str}: no .slp files, skipping")
+            continue
+
+        nodes: Optional[List[str]] = None
+        present_cnt: Optional[np.ndarray] = None      # coords present per node
+        gated_cnt: Optional[np.ndarray] = None        # coords present AND score >= thresh
+        score_sum: Optional[np.ndarray] = None
+        scores_by_node: Optional[List[List[np.ndarray]]] = None
+        n_frames = 0
+        n_occupied = 0
+
+        for slp_path in slp_files:
+            labels = None
+            try:
+                labels = sleap_io.load_slp(str(slp_path))
+                if nodes is None:
+                    nodes = [n.name for n in labels.skeletons[0].nodes]
+                    k = len(nodes)
+                    present_cnt = np.zeros(k, dtype=np.int64)
+                    gated_cnt = np.zeros(k, dtype=np.int64)
+                    score_sum = np.zeros(k, dtype=float)
+                    scores_by_node = [[] for _ in range(k)]
+
+                arr = np.asarray(labels.numpy(return_confidence=True), dtype=float)
+                if arr.ndim == 4:  # (frames, instances, nodes, 3) -> rows of (nodes, 3)
+                    arr = arr.reshape(arr.shape[0] * arr.shape[1], arr.shape[2], arr.shape[3])
+            except Exception as exc:
+                if verbose:
+                    print(f"  ⚠️ Failed to read {slp_path.name}: {exc}; skipping")
+                continue
+            finally:
+                del labels
+                gc.collect()
+
+            x, y, s = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
+            present = ~np.isnan(x) & ~np.isnan(y)
+            gated = present & (s >= score_thresh)
+            n_frames += arr.shape[0]
+            n_occupied += int(present.any(axis=1).sum())
+            present_cnt += present.sum(axis=0)
+            gated_cnt += gated.sum(axis=0)
+            for j in range(len(nodes)):
+                sj = s[present[:, j], j]
+                if sj.size:
+                    score_sum[j] += float(np.nansum(sj))
+                    scores_by_node[j].append(sj)
+
+        if not nodes or n_frames == 0:
+            continue
+
+        for j, name in enumerate(nodes):
+            all_scores = np.concatenate(scores_by_node[j]) if scores_by_node[j] else np.array([])
+            pcnt = int(present_cnt[j])
+            gcnt = int(gated_cnt[j])
+            if all_scores.size:
+                p10, p25, p50, p75, p90 = (float(v) for v in np.percentile(all_scores, [10, 25, 50, 75, 90]))
+                avg = float(all_scores.mean())
+            else:
+                p10 = p25 = p50 = p75 = p90 = avg = float("nan")
+            pres_occ_gated = 100 * gcnt / n_occupied if n_occupied else 0.0
+            records.append({
+                "subject": int(subjid),
+                "date": date_str,
+                "node": name,
+                "n_frames": n_frames,
+                "n_occupied": n_occupied,
+                "pres_pct_all": 100 * pcnt / n_frames if n_frames else 0.0,
+                "pres_pct_occ": 100 * pcnt / n_occupied if n_occupied else 0.0,
+                "pres_pct_occ_gated": pres_occ_gated,
+                "avg_score": avg,
+                "score_p10": p10,
+                "score_p25": p25,
+                "score_p50": p50,
+                "score_p75": p75,
+                "score_p90": p90,
+                "selected": pres_occ_gated >= 100 * presence_frac,
+            })
+
+        if verbose:
+            print(f"\n=== sub-{int(subjid):03d} date-{date_str}  "
+                  f"({n_frames:,} frames, {n_occupied:,} occupied) ===")
+            print(f"{'node':<14}{'pres%all':>9}{'pres%occ':>9}{'gated%occ':>10}"
+                  f"{'avg':>7}{'p10':>7}{'p50':>7}{'p90':>7}  sel")
+            for r in records[-len(nodes):]:
+                print(f"{r['node']:<14}{r['pres_pct_all']:9.1f}{r['pres_pct_occ']:9.1f}"
+                      f"{r['pres_pct_occ_gated']:10.1f}{r['avg_score']:7.2f}"
+                      f"{r['score_p10']:7.2f}{r['score_p50']:7.2f}{r['score_p90']:7.2f}"
+                      f"   {'[x]' if r['selected'] else '[ ]'}")
+
+    return pd.DataFrame(records)

@@ -2,7 +2,7 @@ param(
     [string]$SourceRoot = "E:\derivatives",
     [string]$DestinationRoot = "Z:\hypnose\derivatives",
     # Match anywhere in name to catch prefixes like sub-XXX_ before the pattern
-    [string[]]$Patterns = @("*sleap_tracking_video*.csv", "*combined_sleap_tracking_timestamps*.csv"),
+    [string[]]$Patterns = @("*sleap_tracking_video*.parquet", "*sleap_tracking_video*.csv", "*combined_sleap_tracking_timestamps*.parquet", "*combined_sleap_tracking_timestamps*.csv"),
     [switch]$DryRun,
     [switch]$ShowSkipped,
     [string[]]$Sub,
