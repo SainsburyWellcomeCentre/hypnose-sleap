@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Windows Git Bash conda activation
-eval "$(conda shell.bash hook)"
-conda activate sleap-gpu 2>/dev/null || conda activate sleap
+source "/c/ProgramData/Miniconda3/etc/profile.d/conda.sh" || { echo "ERROR: conda.sh not found"; exit 1; }
+conda activate sleap-gpu || { echo "ERROR: failed to activate sleap-gpu"; exit 1; }
 
 # run_sleap_inference_local.sh
 #
@@ -66,6 +66,16 @@ add_dates_from_token() {
     fi
 }
 
+add_subject_from_token() {
+    local token="$1"
+    if [[ $token =~ ^[0-9]+$ ]]; then
+        SUBJECTS+=("$token")
+    else
+        echo "Invalid subject ID: $token (use numeric IDs like 57 or 038)" >&2
+        exit 1
+    fi
+}
+
 resolve_output_dir() {
     local token="$1"
     case "${token^^}" in
@@ -94,8 +104,11 @@ declare -A VIDEO_COUNTS
 while [[ $# -gt 0 ]]; do
     case $1 in
         -s|--subject)
-            SUBJECTS+=("$2")
-            shift 2
+            while [[ $# -gt 1 && ! "$2" =~ ^- ]]; do
+                add_subject_from_token "$2"
+                shift
+            done
+            shift
             ;;
         -d|--date)
             while [[ $# -gt 1 && ! "$2" =~ ^- ]]; do

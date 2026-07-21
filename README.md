@@ -91,10 +91,10 @@ Examples (run from this folder in PowerShell):
 ./transfer_sleap_results.ps1
 
 # Copy only specific subjects
-./transfer_sleap_results.ps1 -Sub 45 46 47
+./transfer_sleap_results.ps1 -Sub 45,46,47
 
 # Copy specific dates and/or a range (inclusive)
-./transfer_sleap_results.ps1 -Date 20260213 20260217-20260220
+./transfer_sleap_results.ps1 -Date 20260213,20260217-20260220
 
 # Combine subject and date filters
 ./transfer_sleap_results.ps1 -Sub 45 -Date 20260213-20260220

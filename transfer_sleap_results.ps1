@@ -1,4 +1,5 @@
-function transfer-sleap-results {
+function transfer_sleap_results {
+    [CmdletBinding(PositionalBinding = $false)]
     param(
         [string]$SourceRoot = "E:\derivatives",
         [string]$DestinationRoot = "Z:\hypnose\derivatives",
