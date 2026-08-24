@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Golden-master regression for the sleap-hypnose restructure.
+"""Golden-master regression for the hypnose-sleap restructure.
 
 Fingerprints every session in ``sessions.yml`` at three levels and compares them
 against ``fixtures/*.json``. Exit 0 = GREEN, 1 = RED.

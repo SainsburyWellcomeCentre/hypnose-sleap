@@ -87,3 +87,51 @@ Measurements and choices made during the restructure. Bullets, one fact each.
   the other two but not `naive` from `eeg_surgery`.
 - The quality `.yml` fixes this going forward only, by recording the resolved model dir
   and the md5 of its `training_config.json`.
+
+## 7 — The new environment
+
+- `hypnose-sleap`: python 3.12.14, pandas 3.0.5, numpy 1.26.4, pyarrow 25.0.0,
+  fastparquet 2026.5.0, sleap 1.5.2, sleap-io 0.5.7. All three sibling packages
+  installed editable.
+- **There is no sleap 1.5.5.** PyPI goes 1.5.0, 1.5.1, 1.5.2, then 1.6.0. conda tops out
+  at 1.4.1/py37. Both existing envs run 1.5.2; `sleap_v1.5.5` is a folder name in
+  `../sleap-models`, not a version. The plan's `sleap >=1.5.5` is unsatisfiable.
+- sleap 1.5.2 supports `>=3.11,<3.14` and ships a pure-python wheel, so the current
+  SLEAP stack runs on 3.12 unchanged.
+- **`sleap-io` is pinned to `==0.5.7`.** sleap 1.5.2 pins it as a floor only
+  (`sleap-io[all]>=0.5.7`), so an unpinned install resolves to 0.9.2. Holding it keeps
+  the highest-risk variable out of the environment switch; bumping it is its own
+  one-variable experiment, per Risk 2.
+- **`infer` does not work in this env yet.** `sleap-track.exe` is installed but its
+  backend is not: torch, sleap-nn, lightning and kornia are all absent, because sleap
+  1.5.2 does not declare them. `sleap-gpu` carries torch 2.9.1+cu126 from a custom
+  index. Phase 5 either installs that stack here or keeps `infer` in `sleap-gpu`.
+
+## 8 — Phase 0.5: the environment is transparent
+
+- Method: copy each fixture session's `.slp` into a temp tree, run the repointed
+  `sleap_utils.sleap_labels_and_centroid` against it at the pipeline defaults, and
+  fingerprint what it wrote. The real derivatives tree is only read.
+- Only the four import lines in `sleap_utils.py` were edited — `git diff --numstat`
+  reports exactly `4 4`.
+- Variables that moved: python 3.11.14 -> 3.12.14, pandas 2.3.3 -> 3.0.5, fastparquet
+  2025.12.0 -> 2026.5.0, pyarrow added. Held: numpy 1.26.4, sleap-io 0.5.7, sleap 1.5.2.
+- **Result: 16/16 per-video parquets re-derive byte-identically** across all five
+  sessions, both skeletons.
+- Reading the baselines under the new environment is also unchanged: `regression.py`
+  is GREEN there, including the four L2 combined parquets.
+- ⇒ **no `.newenv.json` fixtures are needed.** The restructure gates against the Phase 0
+  fixtures directly, and a RED from here on is the code.
+- The pandas 2 -> 3 jump moving nothing is the notable part: the centroid pipeline uses
+  `groupby`, `reindex`, `interpolate` and `nanmean`, and none changed under pandas 3 at
+  these inputs.
+
+## 9 — Phase 4 hazard: `add_timestamps_to_sleap_tracking` cannot be redirected
+
+- It takes no `base_dir`. It resolves `get_data_root() / "rawdata"`, derives
+  `../derivatives` from that, and writes the combined parquet into the real tree
+  (`sleap_utils.py:580-581`, `:752-754`).
+- `sleap_labels_and_centroid` *does* take `base_dir`, which is what made Phase 0.5 safe.
+- ⇒ any L2 gate must redirect with `HYPNOSE_DATA_ROOT` / `HYPNOSE_DERIVATIVES_ROOT` plus
+  `cache_clear()`, the way `hypnose_behavior/qc/_common.py` does. Running it as-is would
+  overwrite the L2 baselines.

@@ -6,10 +6,10 @@ from pathlib import Path
 import json
 import gc
 from typing import Dict, Iterable, List, Optional, Tuple, Union
-from hypnose.io.paths import get_derivatives_root, get_data_root
-from hypnose.trial_classification.classification_utils import load_all_streams, load_odor_mapping
-from hypnose.metric_analysis.metrics_utils import load_session_results
-from hypnose.utils.helpers import _get_from_cache, _update_cache
+from hypnose_behavior.io.paths import get_derivatives_root, get_data_root
+from hypnose_behavior.io.loaders import load_all_streams, load_odor_mapping
+from hypnose_behavior.io.load_results import load_session_results
+from hypnose_behavior.utils.helpers import _get_from_cache, _update_cache
 
 
 def _read_table(path: Union[str, Path]) -> pd.DataFrame:

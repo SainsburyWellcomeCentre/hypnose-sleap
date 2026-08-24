@@ -70,7 +70,7 @@ Clone repo on the HPC. Make scripts executable using:
     chmod +x submit_sleap_inference.sh
 
 Submit job: 
-    - cd into the sleap-hypnose folder containing the scripts
+    - cd into the hypnose-sleap folder containing the scripts
     - run: ./submit_sleap_inference.sh -s 40 -d 20251128 -m ./models/251031_100645.single_instance.n=160
 
 ## Transfer SLEAP results locally

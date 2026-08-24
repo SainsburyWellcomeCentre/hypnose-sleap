@@ -1,4 +1,4 @@
-"""Fingerprinting core for the sleap-hypnose regression gate.
+"""Fingerprinting core for the hypnose-sleap regression gate.
 
 Hashes a session's saved SLEAP output so a restructuring step can be shown to change
 no number. Three levels, fingerprinted independently:
