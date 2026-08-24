@@ -1,0 +1,42 @@
+# Data-location profiles, shared across machines.
+#
+# Pick one per machine with:
+#     hypnose-set-data-location <name>        # e.g. local_1 | server-windows
+# That writes configs/data_locations.local.yml (git-ignored).
+#
+# Resolution order: HYPNOSE_* env vars > active profile > legacy data/rawdata symlink.
+# Profile names and paths match hypnose-behavior's, so `--show` agrees in both repos.
+#
+# Each profile needs `rawdata`; `derivatives` defaults to the sibling of `rawdata`.
+
+env_prefix: HYPNOSE
+
+default_active: null
+
+# Named endpoints for the `fetch` and `push` verbs. Not a second `active` key: the
+# active profile stays what infer / extract / combine read and write, and --from / --to
+# override either end of a transfer.
+transfer:
+  remote: server-windows
+  local: local_1
+
+profiles:
+  server-mac:
+    rawdata: /Volumes/harris/hypnose/rawdata
+    derivatives: /Volumes/harris/hypnose/derivatives
+
+  server-windows:
+    rawdata: '\\ceph-gw02.hpc.swc.ucl.ac.uk\harris\hypnose\rawdata'
+    derivatives: '\\ceph-gw02.hpc.swc.ucl.ac.uk\harris\hypnose\derivatives'
+
+  server-linux:
+    rawdata: /mnt/harris/hypnose/rawdata
+    derivatives: /mnt/harris/hypnose/derivatives
+
+  local_1:
+    rawdata: 'E:\rawdata'
+    derivatives: 'E:\derivatives'
+
+  local_2:
+    rawdata: 'D:\rawdata'
+    derivatives: 'D:\derivatives'

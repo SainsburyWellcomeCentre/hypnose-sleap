@@ -1,0 +1,27 @@
+# Model role -> model directory, from ../sleap-models/sleap_v1.5.5/models.
+#
+# A role is what a call site asks for (`--model eeg_surgery`); the training timestamp
+# is what the directory happens to be called. Use `--model <path>` for a one-off.
+#
+# Relative paths resolve under `model_root` in configs/models.local.yml (git-ignored).
+# An absolute path here wins over model_root.
+#
+# The two surgery roles were retrained on brighter images; `previous` records the
+# version before that, for reproducing an older run.
+
+default: naive
+
+models:
+  naive:
+    path: 260305_143707.single_instance.n=340
+    skeleton: [center_head, neck, center, center_back, tail_base, left_ear, right_ear, tail_tip]
+
+  eeg_surgery:
+    path: 260528_150609.single_instance.n=580_260529_104135.single_instance.n=590_260717_162525.single_instance.n=710
+    previous: 260528_150609.single_instance.n=580_260529_104135.single_instance.n=590
+    skeleton: [center_head, neck, center, center_back, tail_base, left_ear, right_ear, tail_tip]
+
+  eeg_headstage:
+    path: 260529_144352.single_instance.n=325_260601_140335.single_instance.n=466_260602_141703.single_instance.n=541_260810_104904.single_instance.n=801
+    previous: 260529_144352.single_instance.n=325_260601_140335.single_instance.n=466_260602_141703.single_instance.n=541
+    skeleton: [tailbase, center_back, center, neck, left_ear, right_ear, headtstage_base, headstage_top]

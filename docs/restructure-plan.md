@@ -247,6 +247,8 @@ One per session; each gate green before the next.
 node set; one baseline read with fastparquet and with pyarrow → same canonical-CSV md5 (decides
 whether the fixtures survive the env switch).
 
+Done 2026-08-24.
+
 **0.5 — env change, code held constant.** Never measure the env and the restructure together.
 
 - Build `hypnose-sleap`.
@@ -266,6 +268,8 @@ whether the fixtures survive the env switch).
   Re-extraction is cheap in compute but needs the `.slp`, which live on `E:` and were never
   pushed. Check what survives during Phase 0.
 
+  Done 2026-08-24.
+
 **1 — skeleton + rename.** GitHub rename (`Joschua21/sleap_analysis` → `hypnose-sleap`; consider
 moving to `SainsburyWellcomeCentre/`), `git remote set-url`, local directory rename.
 `pyproject.toml`, `src/hypnose_sleap/` stubs, both environment files, `.gitignore` (`*.slp`,
@@ -273,6 +277,8 @@ moving to `SainsburyWellcomeCentre/`), `git remote set-url`, local directory ren
 and both `.DS_Store`.
 *Gate:* `-e ../hypnose-helpers`, `-e ../hypnose-behavior` and `-e .` all install; all three imports
 work; `hypnose-sleap --help` runs; `regression.py` still reads its fixtures.
+
+Done 2026-08-24.
 
 **2 — paths, layout, parameters.** `io/paths.py`
 (`DataLocations(config_dir=configs, env_prefix="HYPNOSE")`), `io/layout.py` (rawdata/derivatives

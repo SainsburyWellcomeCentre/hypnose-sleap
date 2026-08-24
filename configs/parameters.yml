@@ -1,0 +1,14 @@
+# Pipeline parameters. Every value here is a CLI flag away from being overridden;
+# these are the defaults every saved baseline was produced with.
+
+# extract: a point below this score is treated as missing.
+score_thresh: 0.4
+
+# extract: a node present in at least this fraction of occupied frames joins the centroid.
+presence_frac: 0.7
+
+# extract: internal gaps up to this many frames are interpolated; longer ones stay NaN.
+gap_limit: 120
+
+# infer: sleap-track batch size.
+batch_size: 64

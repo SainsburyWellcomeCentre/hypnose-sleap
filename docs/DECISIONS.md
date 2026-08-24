@@ -86,7 +86,8 @@ Measurements and choices made during the restructure. Bullets, one fact each.
   table above is inferred from the skeleton, which distinguishes `eeg_headstage` from
   the other two but not `naive` from `eeg_surgery`.
 - The quality `.yml` fixes this going forward only, by recording the resolved model dir
-  and the md5 of its `training_config.json`.
+  and the md5 of its training config — `training_config.yaml` for these sleap-nn models;
+  see section 10.
 
 ## 7 — The new environment
 
@@ -135,3 +136,49 @@ Measurements and choices made during the restructure. Bullets, one fact each.
 - ⇒ any L2 gate must redirect with `HYPNOSE_DATA_ROOT` / `HYPNOSE_DERIVATIVES_ROOT` plus
   `cache_clear()`, the way `hypnose_behavior/qc/_common.py` does. Running it as-is would
   overwrite the L2 baselines.
+
+## 10 — Phase 2: the shared resolvers replace the six walks
+
+- `io/paths.py` wraps `hypnose_helpers.io.paths.DataLocations` over `configs/`, with
+  `env_prefix: HYPNOSE` and profile names matching `hypnose-behavior`, so both repos
+  resolve the same tree and `--show` cannot disagree.
+- `io/layout.py` binds two `SessionLayout`s with `subject_pattern="{subject}_id-*"` and
+  owns the one `behav/*/VideoData/*.avi` walk (`session_videos`) and the one
+  `<behav>__<video>` naming rule (`video_key`).
+- **Gate: identical to the old bash glob.** `find_sessions` over `E:\rawdata` returns
+  **175 sessions across 7 subjects**, and `session_videos` enumerates **545 videos** —
+  exactly what `run_sleap_inference_local_windows.sh`'s `find` + `for TS_DIR in
+  "$BEHAV_DIR"/*T*` walk produced. No session added, dropped or reordered.
+- `local_2` (`D:\rawdata` / `D:\derivatives`) added as a profile, since sub-066 lives there.
+- `transfer: {remote: server-windows, local: local_1}` added per Q3. No second `active`
+  key; `resolve_profile(name)` resolves a named endpoint alongside the active profile.
+
+### `MOVEMENT_SUBFOLDER` is duplicated, not imported
+
+- `io/layout.py` defines `movement_analysis` itself rather than importing it from
+  `hypnose_behavior`, so `extract` runs without that package.
+- `qc/check_layout.py` is what stops the two copies drifting: it asserts
+  `MOVEMENT_SUBFOLDER`, `RESULTS_DIRNAME` and `SUBJECT_PATTERN` are equal in both
+  packages, and — the part that matters — that
+  `hypnose_behavior.io.layout.find_tracking_file` actually locates a file written at our
+  `write_path`. Currently green.
+- This closes the `sleap-hypnose` item in `hypnose-behavior/docs/TODO.md`.
+
+### The models are sleap-nn, not TensorFlow
+
+- Every directory in `../sleap-models/sleap_v1.5.5/models` holds `best.ckpt` +
+  `training_config.yaml` + `initial_config.yaml`. The old TF layout
+  (`best_model.h5` + `training_config.json`) is what the retired `models/` in this repo
+  had, and section 5's provenance plan named the wrong file.
+- `model_provenance` looks for `training_config.yaml` then `training_config.json`, and
+  records which it hashed. Current md5s: `naive` `3b66ccc8`, `eeg_surgery` `b6f86d0a`,
+  `eeg_headstage` `69f5b20e`.
+- A model directory name is a concatenation of training run timestamps
+  (`..n=580_..n=590_..n=710`); it records the retraining chain, not three models.
+
+### Config gotcha: UNC paths need two backslashes in YAML
+
+- `server-windows` must read `'\\ceph-gw02...'`. A single leading backslash parses
+  cleanly, resolves to a valid-looking `Path`, and silently is not the share.
+- Now byte-identical to `hypnose-behavior/configs/data_locations.yml`, asserted by
+  comparing the parsed values rather than the file text.
