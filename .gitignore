@@ -1,8 +1,11 @@
-# Ignore Python cache
+# Python cache and build artefacts
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.egg-info/
+build/
+dist/
 
 # VS Code settings
 .vscode/
@@ -10,6 +13,7 @@ __pycache__/
 # Virtual environments
 venv/
 .env/
+.conda/
 
 # History files
 .history/
@@ -17,5 +21,12 @@ venv/
 .DS_Store
 ._*
 
-# ignore SLEAP project files such as models and labels
-.slp
+# SLEAP project files: labels and predictions. `.slp` (no star) matched only a file
+# literally named `.slp`, which is why the 71 MB label file was tracked.
+*.slp
+
+# Trained models live in ../sleap-models, not here.
+models/
+
+# Per-machine config: the active data-location profile and the local model root.
+configs/*.local.yml

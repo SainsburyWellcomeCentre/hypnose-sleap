@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hypnose-sleap"
+version = "0.1.0"
+description = "SLEAP pose tracking for hypnose experiments: inference, centroid extraction, timestamp alignment and annotated video."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+
+# `hypnose-helpers` and `hypnose-behavior` are installed editable from sibling
+# checkouts by environment.yml, so they are not named here -- pip would look on PyPI.
+# `sleap` is likewise conda-side: only the `infer` verb needs it, and it pulls torch.
+dependencies = [
+    "numpy<2",
+    "pandas",
+    "pyarrow",
+    "fastparquet",
+    "pyyaml",
+    "tqdm",
+    "h5py",
+    "Pillow",
+    "opencv-python",
+    "sleap-io",
+]
+
+[project.scripts]
+hypnose-sleap = "hypnose_sleap.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# regression.py resolves both package-relative, so an install without them has the
+# gate but not its baselines.
+"hypnose_sleap.qc" = ["fixtures/*.json", "sessions.yml"]

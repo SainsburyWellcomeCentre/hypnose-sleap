@@ -1,0 +1,45 @@
+# Sessions the regression gate freezes as baselines.
+#
+# Chosen for code-path coverage:
+#   - new model      : sessions run with the current models, so a re-extraction is a
+#                      fair comparison
+#   - node drop      : a node below presence_frac, exercising node selection and the
+#                      fallback when nothing meets it
+#   - multi-behav    : more than one behav/ folder, exercising the <behav>__<video>
+#                      prefix and video ordering
+#   - both skeletons : the tail_tip node set and the headstage node set
+#
+# `derivatives` defaults to `default_derivatives`; `levels` defaults to all three.
+
+default_derivatives: 'E:\derivatives'
+
+sessions:
+  # tail_tip skeleton, tail_tip dropped. 2 videos, 1 behav folder.
+  - subjid: "057"
+    date: "20260717"
+    label: new_model_tail_tip_skeleton
+
+  # Largest of the current-model sessions: 4 videos, 1 behav folder.
+  - subjid: "058"
+    date: "20260717"
+    label: new_model_four_videos
+
+  # 3 videos, 1 behav folder.
+  - subjid: "059"
+    date: "20260717"
+    label: new_model_three_videos
+
+  # The headstage skeleton (tailbase / headstage_top / headtstage_base), with
+  # headtstage_base dropped. Lives on D: and has no combined parquet, so L1 only.
+  - subjid: "066"
+    date: "20260723"
+    label: headstage_skeleton_per_video_only
+    derivatives: 'D:\derivatives'
+    levels: [per_video, quality]
+
+  # The only multi-behav case: 2 behav folders, and both contain a video whose
+  # basename is `...1904-01-07T15-00-00.avi`. Without the <behav>__ prefix the two
+  # collide, so this is what proves the prefix and the video ordering survive.
+  - subjid: "057"
+    date: "20260616"
+    label: multi_behav_colliding_video_basenames

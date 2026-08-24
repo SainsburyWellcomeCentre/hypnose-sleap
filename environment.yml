@@ -1,0 +1,39 @@
+# The hypnose-sleap environment: runs the whole pipeline in one interpreter.
+#
+# - Both parquet engines: fastparquet reads the baselines, pyarrow is what
+#   hypnose-behavior writes with.
+# - `sleap` must match the models (trained under 1.5.5); `sleap-io` is what `extract`
+#   reads .slp with and is upstream of every regression fingerprint.
+# - GPU torch wheels come from a custom index -- see the README, not this file.
+# - The three editable installs assume sibling checkouts beside this repo.
+name: hypnose-sleap
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.12,<3.13
+  - numpy<2
+  - pandas
+  - pyarrow
+  - fastparquet
+  - pyyaml
+  - tqdm
+  - h5py
+  - pillow
+  - matplotlib
+  - scipy
+  - opencv
+  - dotmap
+  - ipython
+  - ipykernel
+  - ipywidgets
+  - pip
+  - pip:
+    - sleap>=1.5.5
+    - sleap-io
+    - swc-aeon==0.1.0
+    - harp-python
+    - moviepy
+    - -e ../hypnose-helpers
+    - -e ../hypnose-behavior
+    - -e .
