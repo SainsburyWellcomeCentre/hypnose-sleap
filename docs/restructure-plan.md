@@ -1,8 +1,8 @@
 # Restructure plan — `sleap-hypnose` → `hypnose-sleap`
 
-Repo root holds 2 429 lines of shell, PowerShell and one 1 631-line Python module. No package, no
+Repo root holds 2 445 lines of shell, PowerShell and one 1 631-line Python module. No package, no
 config, no gate. Target: a `src/`-layout package resolving data locations through
-`hypnose_helpers`, with a regression gate proving the move changed no number. Measured on `907bd83`.
+`hypnose_helpers`, with a regression gate proving the move changed no number. Measured on `14d93b3`.
 
 **Doc style, here and in `DECISIONS.md`:** bullets, one fact each, no prose around the point.
 
@@ -13,7 +13,7 @@ config, no gate. Target: a `src/`-layout package resolving data locations throug
 - Baseline = the `.parquet` files already saved on the server, re-derived from the same `.slp`.
 - No copy of the old pipeline runs anywhere. `sleap_utils.py:9-12` imports the pre-rename
   `hypnose` 1.0.0 package; both machines have pulled `hypnose-behavior` 2.0.0 over its source.
-  `sleap_analysis.ipynb`: 10 of 20 cells the same.
+  `sleap_analysis.ipynb`: 11 of 22 cells the same.
 - Old code is recoverable in 4 import lines (Phase 0.5) — but repointed code in a new env is not
   what the server holds, so it is not a baseline.
 
@@ -22,13 +22,13 @@ config, no gate. Target: a `src/`-layout package resolving data locations throug
 | File | Lines | Fate |
 | --- | ---: | --- |
 | `sleap_utils.py` | 1 631 | split into 6 modules under `src/hypnose_sleap/` |
-| `run_sleap_inference_local_windows.sh` | 256 | → `infer` verb (the only one in use) |
+| `run_sleap_inference_local_windows.sh` | 269 | → `infer` verb (the only one in use) |
 | `run_sleap_inference_local.sh` | 126 | delete — differs only in the conda hook and two defaults |
 | `run_sleap_inference.sh` | 141 | delete — HPC copy of the same walk |
 | `submit_sleap_inference.sh` | 84 | keep, thinned to a SLURM wrapper around the shared CLI |
-| `transfer_sleap_results.ps1` | 144 | → `push` verb |
+| `transfer_sleap_results.ps1` | 147 | → `push` verb |
 | `convert-avi.ps1` | 47 | unchanged, moves to `scripts/` |
-| `sleap_analysis.ipynb` | 20 cells | trimmed to the 4 that call the pipeline |
+| `sleap_analysis.ipynb` | 22 cells | trimmed to the 6 that call the pipeline |
 | `models/` | 45 MB | untracked (Q1) |
 | `labels_160_images_2_videos.v001.slp` | 71 MB | untracked (Q1) |
 
@@ -39,6 +39,19 @@ config, no gate. Target: a `src/`-layout package resolving data locations throug
   71 MB label file is tracked.
 - `.DS_Store` is matched by `.gitignore:17` but was committed before the rule existed → needs
   `git rm --cached`.
+
+Changed upstream in `56dad6b` / `14d93b3` (from the PC), after the first draft of this plan:
+
+- `transfer_sleap_results.ps1` is now a PowerShell **profile function**
+  (`function transfer_sleap_results`, `PositionalBinding=$false`, `return` instead of `exit`);
+  body unchanged. `-Sub` / `-Date` now take comma-separated values.
+- `-s` in the inference script takes several subjects in one flag (`-s 57 58 59`).
+- The notebook gained two `sleap_node_quality_report` calls (cells 2 and 8).
+- The inference script now activates **`sleap-gpu`**, hard-failing, via a hardcoded
+  `/c/ProgramData/Miniconda3/etc/profile.d/conda.sh`. That is a different env from
+  `sleap-analysis`, which runs the notebook. **Confirm before Phase 0.5 whether the PC really has
+  two envs** — if inference and extraction are already split, `hypnose-sleap` replaces both or
+  only the analysis one, and that changes what the new `scripts/run_inference.sh` activates.
 
 ## Environment
 
@@ -105,6 +118,8 @@ config, no gate. Target: a `src/`-layout package resolving data locations throug
   present) → the CLI runs inside it and still uses the family selectors.
 - `scripts/run_inference.sh` = conda activate + `python -m hypnose_sleap.cli infer "$@"`. 5 lines.
 - `scripts/submit_inference.sh` = SLURM wrapper → same CLI, so HPC and PC stop drifting.
+- The PowerShell profile-function ergonomics stay available where wanted: a one-line function
+  calling the CLI gives `transfer_sleap_results`-style invocation without a second implementation.
 
 ### Q3 — one active profile, two named transfer endpoints
 
@@ -168,8 +183,10 @@ hypnose-sleap/
 
 ### Quality report
 
-- `sleap_node_quality_report` already computes everything and only prints. Add a writer →
-  `movement_analysis/sleap_quality_sub-XXX_ses-YYYYMMDD.yml`.
+- `sleap_node_quality_report` already computes everything and only prints; the notebook now calls
+  it by hand per session (cells 2 and 8). Add a writer →
+  `movement_analysis/sleap_quality_sub-XXX_ses-YYYYMMDD.yml`, emitted by `extract` so the report
+  is produced with the parquet rather than asked for afterwards.
 - Contents: `model {role, path, training_config_md5}`; `parameters {score_thresh, presence_frac,
   gap_limit}`; `frames {total, occupied}`; per node `{pres_pct_occ, pres_pct_occ_gated, score_p50,
   selected}`; `centroid_nodes`.
@@ -281,8 +298,9 @@ wrappers; `transfer_sleap_results.ps1` retires.
 `push --dry-run` plans the same file set as `transfer_sleap_results.ps1 -DryRun` on the same filters.
 
 **6 — annotate, notebook, README.** `annotate.py` with repointed imports and `find_tracking_file`.
-Notebook trimmed to the pipeline calls plus video creation; the 10 harp-stream debug cells move to
-`hypnose-behavior/notebooks/` or go.
+Notebook trimmed to the pipeline calls plus video creation; cells 10–19 (harp-stream debugging)
+move to `hypnose-behavior/notebooks/` or go; cell 20 (`.slp` frame inspection via h5py) stays — it
+is a SLEAP question, and is the natural seed for a `peek` verb.
 *Gate:* one clip renders end to end; frame count and a sample of frame hashes match a kept
 reference clip if one exists.
 
