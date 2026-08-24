@@ -71,6 +71,35 @@ def resolve_profile(name: str) -> dict:
     return {"name": name, "rawdata": Path(raw), "derivatives": Path(deriv)}
 
 
+def is_remote(name: Optional[str] = None) -> bool:
+    """Whether a profile is the shared server. Defaults to the active profile."""
+    name = name or get_active()
+    if not name:
+        return False
+    profile = load_profiles().get(name)
+    return bool(isinstance(profile, dict) and profile.get("remote"))
+
+
+def require_local(verb: str, *, allow_remote: bool = False) -> None:
+    """Refuse to run a writing verb against a remote profile.
+
+    `.slp` files run to tens of MB per video and belong on local disk until `push`
+    moves the parquet across. ``allow_remote=True`` is the deliberate override.
+    """
+    if allow_remote:
+        return
+    name = get_active()
+    if not is_remote(name):
+        return
+    raise SystemExit(
+        f"refusing to run `{verb}` against the remote profile {name!r} "
+        f"({get_derivatives_root()}).\n"
+        f"  Write locally, then `hypnose-sleap push`:\n"
+        f"      hypnose-set-data-location local_1\n"
+        f"  Or override deliberately with --allow-remote."
+    )
+
+
 def transfer_endpoints() -> dict:
     """The ``transfer: {remote, local}`` profile names from ``data_locations.yml``.
 
@@ -85,6 +114,6 @@ __all__ = [
     "ENV_PREFIX", "get_repo_root", "get_config_dir",
     "get_data_root", "get_rawdata_root", "get_server_root", "get_derivatives_root",
     "load_profiles", "get_active", "set_active", "reload",
-    "resolve_profile", "transfer_endpoints",
+    "resolve_profile", "transfer_endpoints", "is_remote", "require_local",
     "RAW_SUBDIR", "DERIV_SUBDIR", "PROFILES_FILENAME",
 ]

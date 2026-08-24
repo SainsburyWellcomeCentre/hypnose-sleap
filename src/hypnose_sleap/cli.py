@@ -8,6 +8,12 @@
 - ``push``     local derivatives                  -> remote derivatives
 - ``annotate`` ``.avi`` + combined parquet        -> annotated ``.mp4``
 
+The whole loop runs on local disk: ``fetch`` -> ``infer`` -> ``run`` -> ``push``. Only
+``fetch`` and ``push`` touch the server, and the writing verbs refuse a profile marked
+``remote: true`` without ``--allow-remote``.
+
+Nothing here deletes anything. Reclaiming local disk is manual.
+
 Subject and date selectors are shared by every verb and parsed by
 `hypnose_helpers.io.selectors`, so ``-s 57,58`` and ``-d 20260601-20260630`` mean the
 same thing everywhere.
@@ -38,6 +44,12 @@ def _add_dry_run(parser: argparse.ArgumentParser) -> None:
                         help="list what would be done, then exit")
 
 
+def _add_allow_remote(parser: argparse.ArgumentParser) -> None:
+    """For verbs that write bulk output, which belongs on local disk until `push`."""
+    parser.add_argument("--allow-remote", action="store_true",
+                        help="permit writing to a profile marked `remote: true`")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="hypnose-sleap",
@@ -57,6 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("infer", help="run sleap-track over a session's videos")
     _add_session_selectors(p)
     _add_dry_run(p)
+    _add_allow_remote(p)
     p.add_argument("-m", "--model", default=None,
                    help="model role (naive | eeg_surgery | eeg_headstage) or an explicit path")
     p.add_argument("-bz", "--batch-size", type=int, default=None,
@@ -65,6 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("extract", help=".slp -> per-video parquet + quality report")
     _add_session_selectors(p)
     _add_dry_run(p)
+    _add_allow_remote(p)
     p.add_argument("--score-thresh", type=float, default=None)
     p.add_argument("--presence-frac", type=float, default=None)
     p.add_argument("--gap-limit", type=int, default=None)
@@ -74,11 +88,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("combine", help="per-video parquet + harp streams -> combined parquet")
     _add_session_selectors(p)
     _add_dry_run(p)
+    _add_allow_remote(p)
     p.add_argument("--recompute", action="store_true")
 
     p = sub.add_parser("run", help="extract then combine, in one process")
     _add_session_selectors(p)
     _add_dry_run(p)
+    _add_allow_remote(p)
     p.add_argument("--recompute", action="store_true")
 
     p = sub.add_parser("push", help="copy local derivatives to the server")

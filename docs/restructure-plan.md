@@ -170,9 +170,21 @@ hypnose-sleap/
 | `push` | local derivatives `.parquet` / `.yml` | remote derivatives |
 | `annotate` | `.avi` + combined `.parquet` + streams | annotated `.mp4` |
 
+### Everything heavy happens on local disk
+
+- The loop is `fetch` → `infer` → `run` → `push` → `clean`. Only `fetch` and `push` touch
+  the server.
+- Server profiles carry `remote: true` in `configs/data_locations.yml`. `infer`, `extract`,
+  `combine` and `run` call `io.paths.require_local()` and refuse such a profile without
+  `--allow-remote`. Reads are never blocked.
+- The two repos legitimately sit on different profiles on the same machine —
+  `hypnose-sleap` on `local_1`, `hypnose-behavior` on `server-windows` — because one
+  writes bulk intermediates and the other reads finished results. The guard is what keeps
+  that from being a footgun rather than a convention.
 - Outputs go to `saved_analysis_results/movement_analysis/`
   (= `hypnose_behavior.io.layout.MOVEMENT_SUBFOLDER`). Closes the `sleap-hypnose` item in
-  `hypnose-behavior/docs/TODO.md`.
+  `hypnose-behavior/docs/TODO.md`. That is a *naming* agreement — which drive it lands on
+  is the active profile's business, and is local until `push`.
 - Reads use `rglob` — flat and grouped sessions both resolve. Writes create the parent.
 - Filenames unchanged, including `sub-045_ses-20260219_combined_sleap_tracking_timestamps.parquet`
   (a date in the `ses-` slot). The consumer matches by suffix so a rename is safe, but not while
@@ -180,6 +192,19 @@ hypnose-sleap/
 - `.slp` stays local: the current transfer copies only parquet/csv, and re-running inference is
   cheaper than storing them. `extract` still reads `.slp` from the active profile's derivatives, so
   older sessions whose `.slp` reached the mount still work.
+
+### No deletion, anywhere
+
+- **`rawdata/` is read-only.** It holds the only copy of every recorded video.
+- **No verb deletes anything.** No `clean` verb, and no deletion call in the package.
+- Rejected: a `clean` verb behind an "is this path local?" test. Such a test is a
+  per-platform heuristic, and a server mounted as `Z:` — or under `/Volumes`, or `/mnt` —
+  and then added as a profile defeats it. The convenience saved is one manual delete; the
+  failure mode is losing irreplaceable video.
+- Reclaiming local disk is manual: delete `rawdata/` on `D:` / `E:` by hand.
+- `push` composes its destination from `get_derivatives_root()` only. That is what keeps
+  it out of rawdata — `hypnose_helpers` resolves the two roots separately, so reaching
+  rawdata takes a deliberate call to the wrong function.
 
 ### Quality report
 
@@ -301,7 +326,8 @@ combined file in the temp derivatives dir — assert by calling it.
 **5 — infer, fetch, push.** `inference.py`, `io/transfer.py`. Four bash scripts → two thin
 wrappers; `transfer_sleap_results.ps1` retires.
 *Gate:* `infer --dry-run` lists the same videos the old script processed (capture first);
-`push --dry-run` plans the same file set as `transfer_sleap_results.ps1 -DryRun` on the same filters.
+`push --dry-run` plans the same file set as `transfer_sleap_results.ps1 -DryRun` on the same
+filters, and every destination it names is under `get_derivatives_root()`.
 
 **6 — annotate, notebook, README.** `annotate.py` with repointed imports and `find_tracking_file`.
 Notebook trimmed to the pipeline calls plus video creation; cells 10–19 (harp-stream debugging)

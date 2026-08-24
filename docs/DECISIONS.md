@@ -176,6 +176,37 @@ Measurements and choices made during the restructure. Bullets, one fact each.
 - A model directory name is a concatenation of training run timestamps
   (`..n=580_..n=590_..n=710`); it records the retraining chain, not three models.
 
+### Bulk writes are fenced to local disk
+
+- Server profiles carry `remote: true`. `io.paths.require_local(verb)` raises unless the
+  active profile is local or `--allow-remote` is passed; `infer`, `extract`, `combine` and
+  `run` take the flag. Reads are never blocked.
+- The key is ignored by `hypnose_helpers`, so the profiles stay interchangeable with
+  `hypnose-behavior`'s.
+- Measured on this machine: `hypnose-sleap` is on `local_1`, `hypnose-behavior` is on
+  `server-windows`. That divergence is correct — one writes bulk intermediates, the other
+  reads finished results — but nothing enforced it, and a single
+  `hypnose-set-data-location server-windows` here would have sent 60 MB `.slp` files to
+  ceph. The guard makes it a deliberate act.
+- `find_tracking_file` agreeing with our `write_path` is a **naming** agreement only.
+  Which drive the file lands on is the active profile's business.
+
+### No deletion, and no machinery to police it
+
+- `rawdata/` holds the only copy of every recorded video. Nothing here deletes anything.
+- **No `clean` verb.** Rejected because its guard would be an "is this path local?" test,
+  which is a per-platform heuristic: a server mounted as `Z:`, or under `/Volumes`, or
+  `/mnt`, then added as a profile, defeats it. The convenience saved is one manual
+  delete; the failure mode is losing irreplaceable video.
+- Local disk is reclaimed by hand: delete `rawdata/` on `D:` / `E:` when it fills.
+- **Also rejected: an `io/safety.py` write-guard module and AST checks to prove the
+  absence of deletion.** `hypnose_helpers` resolves rawdata and derivatives as separate
+  roots, so `push` composing its destination from `get_derivatives_root()` is already
+  what keeps it out of rawdata. A module plus two gates to enforce what one function call
+  determines is weight this repo does not need — it does one contained job.
+- The guard that stays is `io.paths.require_local()`: twenty lines in an existing file,
+  addressing a hazard that actually exists (writing 60 MB `.slp` files to the server).
+
 ### Config gotcha: UNC paths need two backslashes in YAML
 
 - `server-windows` must read `'\\ceph-gw02...'`. A single leading backslash parses

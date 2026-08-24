@@ -20,16 +20,24 @@ transfer:
   remote: server-windows
   local: local_1
 
+# `remote: true` marks a profile as the shared server. The heavy-write verbs (infer,
+# extract, combine) refuse to run against one without --allow-remote, because a .slp is
+# tens of MB per video and belongs on local disk until `push` moves the parquet over.
+# Reads are never blocked. The key is ignored by hypnose_helpers, so these profiles stay
+# interchangeable with hypnose-behavior's.
 profiles:
   server-mac:
+    remote: true
     rawdata: /Volumes/harris/hypnose/rawdata
     derivatives: /Volumes/harris/hypnose/derivatives
 
   server-windows:
+    remote: true
     rawdata: '\\ceph-gw02.hpc.swc.ucl.ac.uk\harris\hypnose\rawdata'
     derivatives: '\\ceph-gw02.hpc.swc.ucl.ac.uk\harris\hypnose\derivatives'
 
   server-linux:
+    remote: true
     rawdata: /mnt/harris/hypnose/rawdata
     derivatives: /mnt/harris/hypnose/derivatives
 
