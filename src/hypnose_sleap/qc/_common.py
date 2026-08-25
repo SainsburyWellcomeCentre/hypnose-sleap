@@ -12,9 +12,13 @@ pipeline into a temp dir. Only ``disk`` works until `hypnose_sleap.extract` exis
 """
 from __future__ import annotations
 
+import io
 import hashlib
 import json
+import shutil
 import sys
+import tempfile
+import contextlib
 from pathlib import Path
 
 import pandas as pd
@@ -271,27 +275,60 @@ def check_quality_consistency(fingerprint: dict) -> list[str]:
 
 # --- session fingerprint ---------------------------------------------------
 
-def fingerprint_session(subjid, date, *, derivatives, levels=LEVELS) -> dict:
-    """Fingerprint one session's saved output across the requested `levels`.
+@contextlib.contextmanager
+def _measured(results: Path, subjid, date, *, rederive: bool):
+    """The directory L1 and L3 are fingerprinted from.
 
-    A level not in ``levels`` records as ``"NOT BASELINED"``, which is distinct from
-    `ABSENT` -- sub-066 has no combined parquet, and neither value may read as the other.
+    ``rederive=False`` yields the saved results directory. Otherwise the session's
+    ``.slp`` files are copied into a temp tree and `extract_session` is run against
+    that -- it writes its parquet beside its input, so pointing it at the real tree
+    would overwrite the baselines.
+    """
+    if not rederive:
+        yield results
+        return
+
+    with tempfile.TemporaryDirectory(prefix="hyp_rederive_") as tmp:
+        session_dir = results.parent
+        deriv = Path(tmp) / "derivatives"
+        staged = deriv / session_dir.parent.name / session_dir.name / RESULTS_DIRNAME
+        staged.mkdir(parents=True)
+        for slp in _sorted_matches(results, SLP_GLOB):
+            shutil.copy2(slp, staged / slp.name)
+        # The model that wrote these `.slp` is not recorded anywhere, so it is not
+        # claimed: `model=None` writes UNKNOWN_MODEL into the quality report.
+        with contextlib.redirect_stdout(io.StringIO()):
+            _extract_session(subjid, date, model=None, derivatives=deriv, skip_empty=True)
+        yield staged
+
+
+def fingerprint_session(subjid, date, *, derivatives, levels=LEVELS, rederive=None) -> dict:
+    """Fingerprint one session across the requested `levels`.
+
+    - a level not in ``levels`` records as ``"NOT BASELINED"``, which is distinct from
+      `ABSENT` -- sub-066 has no combined parquet, and neither may read as the other;
+    - ``rederive`` defaults to `REDERIVE_AVAILABLE`: L1 and L3 then come from a fresh
+      run into a temp tree rather than from the saved files;
+    - L2 always reads the saved tree, since `combine` has not moved yet.
     """
     results = results_dir(derivatives, subjid, date)
+    if rederive is None:
+        rederive = REDERIVE_AVAILABLE
 
     fingerprint: dict = {
         "results_dir": str(results),
         "inputs": fingerprint_inputs(results),
     }
-    fingerprint["per_video"] = (
-        fingerprint_per_video(results) if "per_video" in levels else "NOT BASELINED"
-    )
-    fingerprint["combined"] = (
-        fingerprint_combined(results) if "combined" in levels else "NOT BASELINED"
-    )
-    fingerprint["quality"] = (
-        fingerprint_quality(results) if "quality" in levels else "NOT BASELINED"
-    )
+    with _measured(results, subjid, date, rederive=rederive) as measured:
+        fingerprint["per_video"] = (
+            fingerprint_per_video(measured) if "per_video" in levels else "NOT BASELINED"
+        )
+        fingerprint["combined"] = (
+            fingerprint_combined(results) if "combined" in levels else "NOT BASELINED"
+        )
+        fingerprint["quality"] = (
+            fingerprint_quality(measured) if "quality" in levels else "NOT BASELINED"
+        )
     return fingerprint
 
 

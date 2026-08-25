@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from typing import Optional
+
 from hypnose_helpers.io.paths import (
     DataLocations, DERIV_SUBDIR, PROFILES_FILENAME, RAW_SUBDIR, env_path, read_yaml,
 )

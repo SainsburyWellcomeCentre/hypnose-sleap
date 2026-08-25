@@ -95,8 +95,10 @@ def generate(targets: set[str]) -> int:
     for s in sessions:
         subjid, date, label = s["subjid"], s["date"], s.get("label", "")
         try:
+            # Always `disk`: a baseline is what the saved files say, never a re-run.
             fp = _common.fingerprint_session(
                 subjid, date, derivatives=s["derivatives"], levels=s["levels"],
+                rederive=False,
             )
         except Exception as e:
             print(f"  [FAIL] {_key(subjid, date)} ({label}): {e}")

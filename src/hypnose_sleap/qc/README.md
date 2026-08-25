@@ -32,12 +32,14 @@ Exit 0 = GREEN, 1 = RED.
 ## Sources
 
 - `disk` — re-hash the saved baseline files. Checks that the fingerprinting is
-  deterministic; **not** a gate on the pipeline. Used by `--generate`, and by a compare
-  while `hypnose_sleap.extract` does not exist.
-- `rederive` — run the new pipeline and fingerprint its output. The actual gate; turns
-  on automatically once `extract.py` lands.
+  deterministic; **not** a gate on the pipeline. Always used by `--generate`.
+- `rederive` — run the new pipeline and fingerprint its output. The actual gate; on
+  automatically since `extract.py` landed.
 
-Which one ran is printed at the top of every compare.
+Which one ran is printed at the top of every compare. `rederive` stages the session's
+`.slp` into a temp tree and runs `extract_session` there, because extract writes its
+parquet beside its input — the real derivatives tree is only ever read. L2 always reads
+the saved tree, until `combine` moves in Phase 4.
 
 ## Fixtures
 
@@ -65,3 +67,20 @@ one interpreter, so the fixtures survive the environment switch.
 both default from the file header. Chosen for coverage of: both skeletons, a node below
 `presence_frac`, and a multi-`behav/` session whose two folders hold videos with the
 same basename.
+
+## AST move check
+
+```bash
+python src/hypnose_sleap/qc/ast_move_check.py             # the Phase 3 set vs HEAD
+python src/hypnose_sleap/qc/ast_move_check.py --show-diff # why something drifted
+```
+
+Complements `regression.py`: the regression proves five sessions still produce the same
+numbers, this proves no moved body drifted at all — including in a branch those sessions
+never take. Every definition in scope must reappear with a byte-identical source segment,
+compared after `dedent` so a helper lifted out of its enclosing function still counts as
+a move.
+
+`--only NAME` names what a phase moved; the default is Phase 3's five. Later phases pass
+their own set, and `--all` — every definition in `sleap_utils.py` — is what Phase 7 runs
+once the file is gone.

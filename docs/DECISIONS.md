@@ -213,3 +213,103 @@ Measurements and choices made during the restructure. Bullets, one fact each.
   cleanly, resolves to a valid-looking `Path`, and silently is not the share.
 - Now byte-identical to `hypnose-behavior/configs/data_locations.yml`, asserted by
   comparing the parsed values rather than the file text.
+
+## 11 — Phase 3: the centroid pipeline moved, de-nested
+
+- `sleap_labels_and_centroid` → `extract.extract_session`; `sleap_node_quality_report`
+  → `quality.py`, plus the `.yml` writer.
+- **L1 GREEN: 16/16 per-video parquets re-derive byte-identically** across all five
+  sessions. L3 consistent on all five. L2 unchanged (still read from disk).
+- `regression.py` now prints `SOURCE: rederive`. `_common.fingerprint_session` gained
+  the branch behind that banner: it stages the session's `.slp` into a temp tree and
+  runs `extract_session` there, because extract writes beside its input. `--generate`
+  pins `rederive=False` — a baseline is what the saved files say, never a re-run.
+
+### Four helpers de-nested, byte-identically
+
+- `extract_points_and_scores`, `to_number`, `infer_video_file_from_slp` and
+  `node_names_for_instance` were nested in `sleap_labels_and_centroid`; only
+  `resolve_deriv_root` closed over the signature, and `io/layout.py` replaces it.
+- They close over one variable, `nan = float("nan")`, now a module constant.
+- `_compute_session_centroid` was already top-level and moved unchanged.
+- All five assembled into `extract.py` by script, not by retyping — the AST check
+  proves the result, it does not protect the transcription.
+
+### `ast_move_check.py` needed three changes to express this gate
+
+- **Nested collection.** It collected top-level defs only, so three of the four
+  required names were invisible on the "before" side. It now descends into functions
+  (not into classes: a method is part of its class's segment).
+- **Dedented comparison.** De-nesting shifts every line left 4, so segments are
+  compared after `textwrap.dedent`. That also normalises whitespace-only lines —
+  `sleap_utils.py:228` is 8 spaces — and is the only leniency. A re-wrapped or
+  re-indented body is still CHANGED.
+- **`--only` scope.** `sleap_utils.py` empties over four phases, so the eleven
+  definitions still awaiting Phases 4-6 would all read as MISSING. `--only` names what
+  a phase moved (default: the Phase 3 five); `--all` is what Phase 7 runs.
+- Ambiguity is refused, not resolved: `resolve_deriv_root` is nested in **two**
+  functions (`:200` and `:1337`), so the name is marked ambiguous and fails only if
+  something puts it in scope. Two *top-level* definitions of one name still raise.
+- It also read files with the locale encoding. `sleap_utils.py` is UTF-8 (`✓`, `⚠️`),
+  so on this machine every read died in cp1252 before comparing anything; `git show`
+  and `read_text` are both pinned to UTF-8 now.
+
+### `sleap_io` 0.5.7 takes the first branch every time
+
+- Measured on `sub-057_date-20260717`: instances are `PredictedInstance`,
+  `inst.numpy()` returns an `(n_nodes, 2)` `ndarray`, and `inst.points[idx][1]` yields
+  a `float64` confidence.
+- ⇒ the `points_array` / `points` coordinate fallbacks and the `point_confidences`
+  score fallback are **dead code at 0.5.7**, as is every `as_xy` branch after the first.
+- That is the measurement Risk 2 wants: a `sleap_io` bump is a regression risk exactly
+  because it could move which branch fires, and now there is a recorded starting point.
+
+### The quality report and extract count occupied frames differently
+
+- `extract` (`sleap_utils.py:442`) counts a frame occupied when some node is present
+  **and** above `score_thresh`. The report (`:1581`) counts it occupied when some node
+  is present, **ungated**, then divides gated counts by that.
+- Different denominators, so the two can disagree on a borderline node. Measured on
+  057:20260717, `center_head`: 98.954 % (report) vs 98.9681 % (extract); occupancy
+  273,003 gated vs 273,042 ungated, a 39-frame gap.
+- **Not unified.** Extract's denominator cannot move without breaking L1, so
+  unification would have to change the report — which is the number the notebook has
+  been reading to compare models, and changing it inside a move phase is two variables
+  at once.
+- Unified instead on *authority*: the `.yml`'s `centroid_nodes`, and each node's
+  `selected`, come from extract's selection, so L3's assertion holds by construction
+  rather than by coincidence. Both fractions are written side by side
+  (`pres_pct_occ_gated` and `selection_pct`), and the report's own `selected` column
+  stays in the DataFrame for interactive use without entering the file.
+
+### Model provenance is required, and never guessed
+
+- `extract_session(model=...)` is a **required** keyword that may be None. None records
+  `quality.UNKNOWN_MODEL` (all four fields null).
+- `parameters.model_provenance(None)` falls through to `models.yml`'s `default`, so a
+  re-extraction of an old `.slp` would otherwise write a confident, wrong provenance
+  into the one file meant to fix §6. Requiring the argument makes it a decision.
+- The regression harness passes `model=None`: nothing records which model wrote the
+  baseline `.slp` files.
+
+### Smaller notes
+
+- Session discovery moved to `io/layout.py`. `find_session` raises on an ambiguous date
+  where the old `sorted(...)[0]` picked the first; `.slp` discovery uses `find_outputs`,
+  which rglobs (so `movement_analysis/`-grouped `.slp` resolve) and skips `._` forks.
+- `_resolve_deriv_root`, `_available_sessions` and `_normalize_date_arg` were used only
+  by `sleap_node_quality_report` and are **not ported** — `find_sessions(date=...)`
+  already takes a value, list, comma string or `A-B` range.
+- `sleap_node_quality_report` is not a byte-identical move: its per-session arithmetic
+  is `quality.session_node_stats`, and the wrapper is discovery plus printing. The
+  arithmetic is unchanged; it is not in the required-identical set.
+- `write_report` re-reads every `.slp`, so `extract` reads each one twice — once via
+  `load_slp` for the table, once via `labels.numpy()` for the stats. Accepted: the
+  alternative is a second implementation of the presence counts, computed over a
+  different row universe, which is a numerics change dressed as an optimisation.
+- `require_local()` is **not** called in `extract.py`. It guards the active profile,
+  which is meaningless when `derivatives=` is passed explicitly; it belongs on the CLI
+  verb, wired with the rest of the CLI.
+- `df.to_parquet(output_path, index=False)` keeps its default engine — pyarrow, in this
+  env. That is exactly what Phase 0.5 measured, and §2 established the engine does not
+  move the fingerprint.

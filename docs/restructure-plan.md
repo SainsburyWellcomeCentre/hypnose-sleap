@@ -312,10 +312,14 @@ Done 2026-08-24.
 *Gate:* `hypnose-set-data-location --list/--show` works from the repo root; `find_sessions` returns
 the same session list the old bash glob did — capture that list first.
 
+Done 2026-08-24
+
 **3 — extract.** `sleap_labels_and_centroid` → `extract.py`, numerics untouched, paths via layout,
 outputs to `movement_analysis/`. `sleap_node_quality_report` → `quality.py` plus the `.yml` writer.
 Record which points fallback `sleap_io` takes.
 *Gate:* L1 GREEN; `ast_move_check` clean; L3 consistency holds.
+
+Done 2026-08-25.
 
 **4 — combine.** `get_video_frame_times` + `add_timestamps_to_sleap_tracking` → `timestamps.py`,
 imports repointed, lazy, `rglob` discovery. `process_sleap_sessions` → the `run` verb, same summary
