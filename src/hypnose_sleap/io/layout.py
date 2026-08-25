@@ -6,8 +6,10 @@
   `hypnose_behavior.io.layout.find_tracking_file` reads.
 - Reads use ``rglob``, so flat and grouped sessions both resolve; `write_path` creates
   the parent.
-- `session_videos` and `video_key` are the one implementation of the
-  ``behav/*/VideoData/*.avi`` walk and the ``<behav>__<video>`` naming.
+- `session_videos`, `session_experiments` and `video_key` are the one implementation of
+  the ``behav/*/VideoData/*.avi`` walk and the ``<behav>__<video>`` naming.
+- `find_tracking_tables` and `find_combined_table` are how a reader finds what `extract`
+  and `combine` wrote, whichever extension and whichever layout it landed in.
 
 No `hypnose_behavior` import: `extract` runs without it. `MOVEMENT_SUBFOLDER` agreeing
 with that package is asserted by `qc/check_layout.py`, not by importing it here.
@@ -41,6 +43,11 @@ MOVEMENT_SUBFOLDER = "movement_analysis"
 # The raw video tree inside one session, and the extensions worth walking.
 VIDEO_GLOB = "behav/*/VideoData/*.avi"
 
+# The two output tables, as name globs without extension. Matched rather than looked
+# up: older sessions wrote `.csv`, newer ones `.parquet`, flat or grouped.
+TRACKING_STEM_GLOB = "sleap_tracking_video*"
+COMBINED_STEM_GLOB = "*_combined_sleap_tracking_timestamps"
+
 rawdata = SessionLayout(get_rawdata_root, name="rawdata", subject_pattern=SUBJECT_PATTERN)
 derivatives = SessionLayout(
     get_derivatives_root, name="derivatives", subject_pattern=SUBJECT_PATTERN
@@ -48,9 +55,14 @@ derivatives = SessionLayout(
 
 
 def layout_for(root=None, *, name: str = "derivatives") -> SessionLayout:
-    """The configured derivatives layout, or an ad-hoc one rooted at ``root``."""
+    """The configured layout called ``name``, or an ad-hoc one rooted at ``root``.
+
+    The two roots are resolved independently, so a caller may redirect one and leave
+    the other alone -- ``combine`` writes into a temp derivatives tree while still
+    reading the real rawdata streams.
+    """
     if root is None:
-        return derivatives
+        return rawdata if name == "rawdata" else derivatives
     return SessionLayout(root, name=name, subject_pattern=SUBJECT_PATTERN)
 
 
@@ -107,6 +119,39 @@ def find_output(results, pattern: str) -> Optional[Path]:
     return matches[0]
 
 
+def _table_rank(path: Path) -> tuple:
+    """Preference between two tables of the same stem: parquet first, grouped first."""
+    return (0 if path.suffix == ".parquet" else 1,
+            0 if path.parent.name == MOVEMENT_SUBFOLDER else 1)
+
+
+def find_tables(results, stem_glob: str) -> list:
+    """One table per stem matching ``stem_glob`` (a name glob without extension).
+
+    Parquet wins over ``.csv``, and a ``movement_analysis/`` copy over a flat one. Both
+    can exist at once: a session extracted before the grouping and again after it keeps
+    both, since nothing here deletes.
+    """
+    best: dict = {}
+    for ext in ("parquet", "csv"):
+        for path in find_outputs(results, f"{stem_glob}.{ext}"):
+            current = best.get(path.stem)
+            if current is None or _table_rank(path) < _table_rank(current):
+                best[path.stem] = path
+    return sorted(best.values(), key=lambda p: p.name)
+
+
+def find_tracking_tables(results) -> list:
+    """The per-video SLEAP tables of a session, ordered by file name."""
+    return find_tables(results, TRACKING_STEM_GLOB)
+
+
+def find_combined_table(results) -> Optional[Path]:
+    """The session's combined-timestamps table, or None when it has not been built."""
+    matches = find_tables(results, COMBINED_STEM_GLOB)
+    return matches[0] if matches else None
+
+
 def video_key(video: Path) -> str:
     """The ``<behav>__<video>.avi`` name a video is known by downstream.
 
@@ -130,11 +175,26 @@ def session_videos(session) -> list:
     )
 
 
+def session_experiments(session) -> list:
+    """Every ``behav/`` experiment folder holding video, in `session_videos` order.
+
+    Derived from the video walk rather than from a second glob of its own, so the two
+    cannot disagree about which folders a session has. A folder with harp streams but
+    no video is not one: it contributes no frame times.
+    """
+    folders: dict = {}
+    for video in session_videos(session):
+        folders.setdefault(video.parents[1], None)
+    return list(folders)
+
+
 __all__ = [
     "rawdata", "derivatives", "layout_for", "SUBJECT_PATTERN",
     "RESULTS_DIRNAME", "MOVEMENT_SUBFOLDER", "VIDEO_GLOB",
+    "TRACKING_STEM_GLOB", "COMBINED_STEM_GLOB",
     "results_dir", "movement_dir", "write_path", "find_outputs", "find_output",
-    "video_key", "session_videos",
+    "find_tables", "find_tracking_tables", "find_combined_table",
+    "video_key", "session_videos", "session_experiments",
     "SessionRef", "SessionLayout", "DuplicateSessionError",
     "list_sessions", "filter_sessions", "normalize_subjid",
     "parse_subject", "parse_subject_dirname", "parse_session_dirname",

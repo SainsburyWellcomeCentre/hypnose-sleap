@@ -82,20 +82,24 @@ def is_remote(name: Optional[str] = None) -> bool:
     return bool(isinstance(profile, dict) and profile.get("remote"))
 
 
-def require_local(verb: str, *, allow_remote: bool = False) -> None:
+def require_local(verb: str, *, allow_remote: bool = False,
+                  profile: Optional[str] = None) -> None:
     """Refuse to run a writing verb against a remote profile.
 
     `.slp` files run to tens of MB per video and belong on local disk until `push`
-    moves the parquet across. ``allow_remote=True`` is the deliberate override.
+    moves the parquet across. ``profile`` names the profile the verb will actually
+    write to, defaulting to the active one; ``allow_remote=True`` is the deliberate
+    override.
     """
     if allow_remote:
         return
-    name = get_active()
+    name = profile or get_active()
     if not is_remote(name):
         return
+    root = resolve_profile(name)["derivatives"] if profile else get_derivatives_root()
     raise SystemExit(
         f"refusing to run `{verb}` against the remote profile {name!r} "
-        f"({get_derivatives_root()}).\n"
+        f"({root}).\n"
         f"  Write locally, then `hypnose-sleap push`:\n"
         f"      hypnose-set-data-location local_1\n"
         f"  Or override deliberately with --allow-remote."

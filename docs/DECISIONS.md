@@ -313,3 +313,108 @@ Measurements and choices made during the restructure. Bullets, one fact each.
 - `df.to_parquet(output_path, index=False)` keeps its default engine — pyarrow, in this
   env. That is exactly what Phase 0.5 measured, and §2 established the engine does not
   move the fingerprint.
+
+## 12 — Phase 4: combine moved, and L2 measured zero
+
+- `get_video_frame_times` + `add_timestamps_to_sleap_tracking` →
+  `timestamps.combine_session`; `process_sleap_sessions` → the `run` verb in `cli.py`.
+- **L2 is byte-identical on all four L2 fixtures.** Re-derived md5s `580319c1` /
+  `29a770d6` / `c771fcce` / `44b17a42` equal the Phase 0 baselines exactly.
+- Row counts equal the §4 sums to the row: 273,042 / 626,936 / 284,034 / 350,869. The
+  join still adds columns, not rows.
+- ⇒ **the delta the plan budgeted for is zero.** The pre-2.0.0 `load_all_streams` that
+  wrote the saved `time` column and the 2.0.0 one agree at these sessions.
+- Per the plan's pre-registered rule ("Zero → L2 becomes a byte-identity check"), L2 is
+  now a **RED**, not a reported delta. Risk 3 is closed by measurement rather than by
+  documentation.
+- L2's input is still not frozen — `load_all_streams` lives in another repo. So the RED
+  names it, and points at `fixtures/env.json`, rather than asserting the cause is here.
+- L2 also carries a separate shape assertion (`check_combined_rows`): the combined row
+  count must equal the sum of the per-video tables. Split from the md5 so "the join
+  changed shape" and "the values moved" cannot be confused for each other.
+
+### `combine` took four redirects, not one
+
+- **`_find_tracking_files` globbed flat** (`sleap_utils.py:45-53`), so it found zero
+  tracking files for any session Phase 3 had extracted into `movement_analysis/`. Only
+  the flat baselines still resolved. `layout.find_tracking_tables` rglobs.
+- **No `base_dir`** (§9): `combine_session` now takes `derivatives=` and `rawdata=`, the
+  same override shape `extract_session` has. The two roots stay independent, which is
+  how `hypnose_helpers` resolves them — the gate writes into a temp derivatives tree
+  while reading the real rawdata.
+- ⇒ §9's hazard is closed: the QC harness needs **no `HYPNOSE_*` env vars and no
+  `cache_clear()`**. `_common.default_rawdata` derives the raw root from the fixture's
+  own derivatives root, so the gate measures the tree `sessions.yml` names.
+- **Wrote flat** (`:752-754`) → `layout.write_path`, so output is grouped like Phase 3's.
+  Filename unchanged and fixture-matched.
+- **A seventh copy of the behav walk** (`:608`, `:614-615`) → `layout.session_experiments`,
+  derived from `session_videos` rather than from a second glob. It matched experiment
+  folders by a `\d{4}-\d{2}-\d{2}T...` regex; the folders are now whatever holds video.
+  Equivalent in output — a folder with no video contributes no frame times either way.
+
+### Two output layouts can coexist, so the reader picks
+
+- Nothing deletes, so re-extracting a baselined session leaves the flat parquets beside
+  the new grouped ones and the same stem matches twice.
+- `layout.find_tables` resolves it: parquet over `.csv`, then `movement_analysis/` over
+  flat. Same rule `hypnose_behavior.io.layout.find_tracking_file` already applies.
+- Without it `combine` would have joined each video twice and doubled the row count —
+  which is exactly what `check_combined_rows` would have caught.
+
+### Three helpers moved byte-identically
+
+- `get_video_frame_times`, `_read_table` and `_peek_video_file` are 3/3 identical under
+  `ast_move_check --only`. No AST requirement was set for this phase; they qualified.
+- `get_video_frame_times` stayed identical because the lazy `hypnose_behavior` import is
+  a **named module-level shim** — `timestamps.load_all_streams` — rather than an import
+  statement inserted into the body. It doubles as the single import surface.
+- `combine_session` is not a byte-identical move: four redirects is what the phase was.
+
+### `fetch` must copy the whole `behav/` tree — measured, not assumed
+
+- Nothing in this repo has ever copied rawdata. `fetch` is a Phase 5 stub; the full tree
+  on `E:` was put there by something else (datashuttle, or by hand). The inference script
+  only *detects* it (`run_sleap_inference_local_windows.sh:152-154`).
+- ⇒ the gate passing is not evidence that the design produces the tree it needs.
+- Measured on `057:20260717`: `.avi` 15,809.5 MB (**98.7 %**), `Behavior/` 87.1 MB,
+  `Olfactometer0/1` 106.4 MB, `VideoData/*.csv` 11.8 MB, rest 6.7 MB — every non-video
+  stream together is **212 MB, 1.3 %** of the session.
+- `combine` never opens an `.avi`: `load_video` globs `VideoData/VideoData_*.csv`
+  (`hypnose_behavior/io/readers.py:121-124`), and the sync needs `Behavior/`.
+- An `.avi`-only fetch therefore breaks `combine` **quietly**: `load_all_streams` catches a
+  missing heartbeat, prints `Failed to load heartbeat`, and returns an empty timestamp
+  mapping — a combined parquet with a degraded `time` column, not an error.
+- ⇒ `fetch` copies the whole `behav/<exp>/` tree. +1.3 % transfer to keep "only `fetch` and
+  `push` touch the server" true.
+- **Rejected: `combine` reading harp streams off the server by default.** It saves 1.3 % of
+  local disk next to 15.8 GB of video already held, and costs network-dependence on the
+  main loop. It would also pull ~200 MB to use ~99 MB, since `load_all_streams` is
+  all-or-nothing and `get_video_frame_times` only uses `video_data` plus the heartbeat.
+  Narrowing which streams it loads is not available: `get_video_frame_times` is
+  byte-identical today, and changing the sync path is what L2 exists to catch.
+- Kept as an override instead: `--rawdata-from <profile>` on `combine` / `run`, for
+  re-combining after local `rawdata` has been deleted. The plumbing already exists —
+  `combine_session(rawdata=...)` — so Phase 5 only exposes it.
+
+### `find_tracking_file` is now asserted against a real file
+
+- `qc/check_layout.py` writes an empty file at our `write_path` and asserts the reader
+  finds it. That proves the naming agreement, not that the pipeline produces a file.
+- `regression.py` now also asserts it against the **combined parquet the gate just
+  re-derived**, in the temp tree (`_common.check_discovery`). Green on all four L2
+  fixtures. That is the Phase 4 gate the plan asked for.
+
+### The CLI verbs are wired, and `require_local` is finally called
+
+- `extract`, `combine` and `run` share one session driver in `cli.py`, keeping
+  `process_sleap_sessions`' message text, skip rules and success/failed/skipped tally.
+  `run` prints byte-identical output to the old wrapper; the other two print the lines
+  for the steps they ran.
+- `--model` is on `extract` and `run`. Omitting it is legal and prints a notice: the
+  quality report records `UNKNOWN_MODEL` rather than claiming the configured default.
+- `require_local(verb, allow_remote=..., profile=...)` is called by all three, and gained
+  a `profile` argument so `--profile server-windows` is refused for the profile it would
+  actually write to, not for the active one.
+- `--profile` resolves a named profile into `derivatives=` / `rawdata=` overrides. It
+  never calls `set_active`: choosing a profile for one command must not rewrite the
+  machine's `data_locations.local.yml`.

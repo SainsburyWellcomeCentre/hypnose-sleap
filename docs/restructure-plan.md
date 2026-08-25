@@ -126,8 +126,14 @@ Changed upstream in `56dad6b` / `14d93b3` (from the PC), after the first draft o
 - No second `active` key: it means "where my data is" family-wide, and `--show` would start
   disagreeing with `hypnose-behavior` on the same machine.
 - `configs/data_locations.yml` gains `transfer: {remote: server-windows, local: local_1}`.
-- `fetch` = remote rawdata → local rawdata (`.avi`). `push` = local derivatives → remote
-  derivatives. `--from` / `--to` override either end.
+- `fetch` = remote rawdata → local rawdata (**the whole `behav/<exp>/` tree**, not just
+  `.avi`). `push` = local derivatives → remote derivatives. `--from` / `--to` override
+  either end.
+- Measured at Phase 4: `.avi` is 98.7 % of a session (15.8 GB), every harp stream
+  together 1.3 % (212 MB). `combine` needs `VideoData/*.csv` and `Behavior/` and never
+  opens an `.avi`, so an `.avi`-only fetch would leave `combine` unable to run — and
+  `load_all_streams` degrades quietly rather than raising when `Behavior/` is missing.
+  Copying the extra 1.3 % is what keeps "only `fetch` and `push` touch the server" true.
 - `push` prints its plan and refuses to overwrite an existing destination file without `--force`.
 - The active profile stays what `infer` / `extract` / `combine` read and write.
 
@@ -163,7 +169,7 @@ hypnose-sleap/
 
 | verb | in | out |
 | --- | --- | --- |
-| `fetch` | remote rawdata `.avi` | local rawdata, same tree |
+| `fetch` | remote rawdata `behav/` tree | local rawdata, same tree |
 | `infer` | local `.avi` + model role | `movement_analysis/<behav>__<video>.predictions.slp` |
 | `extract` | `.slp` | per-video `.parquet` + quality `.yml` |
 | `combine` | per-video `.parquet` + harp streams | one combined `.parquet` per session |
@@ -174,6 +180,11 @@ hypnose-sleap/
 
 - The loop is `fetch` → `infer` → `run` → `push` → `clean`. Only `fetch` and `push` touch
   the server.
+- One deliberate exception, off by default: `combine` / `run` take `--rawdata-from
+  <profile>` so harp streams can be read straight off the server when local `rawdata`
+  has been deleted to reclaim disk. `combine_session(rawdata=...)` already takes the
+  override — Phase 5 only exposes it. Reading is never the default: it would make the
+  heavy loop depend on the network to save 1.3 % of local disk.
 - Server profiles carry `remote: true` in `configs/data_locations.yml`. `infer`, `extract`,
   `combine` and `run` call `io.paths.require_local()` and refuse such a profile without
   `--allow-remote`. Reads are never blocked.
@@ -327,11 +338,34 @@ output.
 *Gate:* L2 measured and recorded; `hypnose_behavior.io.layout.find_tracking_file` finds the
 combined file in the temp derivatives dir — assert by calling it.
 
+Done 2026-08-25. L2 measured **zero** — byte-identical on all four L2 fixtures — so per the
+pre-registered rule it is now a byte-identity check, and Risk 3 is closed by measurement.
+`DECISIONS.md` §12.
+
 **5 — infer, fetch, push.** `inference.py`, `io/transfer.py`. Four bash scripts → two thin
-wrappers; `transfer_sleap_results.ps1` retires.
+wrappers; `transfer_sleap_results.ps1` retires. Plus `--rawdata-from` on `combine` / `run`,
+and `require_local` on `infer` (the flag exists, nothing calls it yet).
 *Gate:* `infer --dry-run` lists the same videos the old script processed (capture first);
 `push --dry-run` plans the same file set as `transfer_sleap_results.ps1 -DryRun` on the same
 filters, and every destination it names is under `get_derivatives_root()`.
+
+Decided before starting:
+
+- `fetch` copies the whole `behav/<exp>/` tree (Q3), not `.avi` only.
+- `push`'s pattern set **must gain `sleap_quality_sub-*.yml`** — Phase 3 added that file and
+  `transfer_sleap_results.ps1:7` predates it, so quality reports reach nobody today.
+- `infer` writes `.slp` through `layout.write_path`, i.e. grouped into `movement_analysis/`
+  like Phase 3 and 4. The old script writes flat (`:238`); `find_outputs` rglobs, so both
+  resolve and old sessions keep working.
+- **The env question from §7 must be answered first.** `sleap-gpu` has torch but none of the
+  three hypnose packages, and it is python 3.11.14 while `pyproject.toml` pins
+  `>=3.12,<3.13` — so `hypnose_sleap` cannot be installed there as written. Either relax
+  the pin, or install the GPU stack into `hypnose-sleap`. This blocks `infer`, not `fetch`
+  or `push`.
+- `set_float32_matmul_precision('high')` at `:246` runs in a **separate** python process and
+  therefore never applied to `sleap-track`. Porting it "correctly" would change float32
+  matmul on Ampere+ and move predictions. Preserve the no-op, or change it deliberately and
+  re-baseline — never silently.
 
 **6 — annotate, notebook, README.** `annotate.py` with repointed imports and `find_tracking_file`.
 Notebook trimmed to the pipeline calls plus video creation; cells 10–19 (harp-stream debugging)
@@ -351,8 +385,10 @@ reference clip if one exists.
    `sleap_io` ≥0.6 extract what 0.5.7 did (Phase 0.5).
 2. `sleap_io` drift is real and now deliberate — 0.5.7 wrote every baseline. Every future bump
    repeats the Phase 0.5 one-variable experiment.
-3. L2 may never be byte-identical, for reasons in `hypnose-behavior` (its standing caveat). Budget
-   for documenting a delta, not chasing it to zero.
+3. ~~L2 may never be byte-identical, for reasons in `hypnose-behavior` (its standing caveat).
+   Budget for documenting a delta, not chasing it to zero.~~ — closed at Phase 4: the delta
+   measured zero on all four L2 fixtures, and L2 is now asserted. Open instead: `load_all_streams`
+   lives in another repo, so an L2 RED is not necessarily this repo's doing (`DECISIONS.md` §12).
 4. Fixture availability — sessions keeping both `.slp` and saved parquets must be found on the PC.
    If none, fall back to re-running inference on one session with a pinned model; weaker, since it
    stops proving the new code reproduces what downstream reads.

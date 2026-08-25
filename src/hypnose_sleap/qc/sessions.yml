@@ -10,6 +10,8 @@
 #   - both skeletons : the tail_tip node set and the headstage node set
 #
 # `derivatives` defaults to `default_derivatives`; `levels` defaults to all three.
+# `rawdata` defaults to the sibling of `derivatives` and is where L2 reads its harp
+# streams from. It is only ever read; every re-derived file is written to a temp tree.
 
 default_derivatives: 'E:\derivatives'
 

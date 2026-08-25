@@ -4,7 +4,8 @@ Hashes a session's saved SLEAP output so a restructuring step can be shown to ch
 no number. Three levels, fingerprinted independently:
 
 - ``per_video`` (L1) -- ``.slp`` -> per-video parquet. Expected byte-identical.
-- ``combined`` (L2)  -- per-video parquet + harp streams -> combined parquet. Measured.
+- ``combined`` (L2)  -- per-video parquet + harp streams -> combined parquet. Measured at
+  Phase 4 and found byte-identical, so asserted as one since.
 - ``quality``  (L3)  -- the quality report ``.yml``. Checked for consistency, not identity.
 
 Two sources: ``disk`` reads the saved baseline files, ``rederive`` runs the new
@@ -27,9 +28,11 @@ import pandas as pd
 # Update ONLY these lines as modules move. The md5s they produce must not change.
 try:
     from hypnose_sleap.extract import extract_session as _extract_session  # noqa: F401
+    from hypnose_sleap.timestamps import combine_session as _combine_session  # noqa: F401
     REDERIVE_AVAILABLE = True
 except Exception:
     _extract_session = None
+    _combine_session = None
     REDERIVE_AVAILABLE = False
 # ---------------------------------------------------------------------------
 
@@ -38,12 +41,14 @@ except Exception:
 # - the gate must not import what it gates;
 # - at Phase 0 it runs in `sleap-analysis`, where the helpers are not installed.
 RESULTS_DIRNAME = "saved_analysis_results"
+RAWDATA_DIRNAME = "rawdata"
 SUBJECT_GLOB = "sub-{subject}_id-*"
 SESSION_GLOB = "ses-*_date-{date}"
 
 # Matched with `rglob`, so flat and `movement_analysis/`-grouped sessions both resolve.
 PER_VIDEO_GLOB = "sleap_tracking_video*.parquet"
-COMBINED_GLOB = "*_combined_sleap_tracking_timestamps.parquet"
+COMBINED_STEM = "*_combined_sleap_tracking_timestamps"
+COMBINED_GLOB = f"{COMBINED_STEM}.parquet"
 QUALITY_GLOB = "sleap_quality_sub-*.yml"
 SLP_GLOB = "*.slp"
 
@@ -248,6 +253,48 @@ def fingerprint_quality(results: Path) -> dict | str:
     }
 
 
+def check_discovery(results: Path) -> dict:
+    """Whether `hypnose_behavior` locates the combined parquet in ``results``.
+
+    Phase 4's gate. `qc/check_layout.py` asserts the same agreement against an empty
+    file it writes itself; this asserts it against the real combined parquet, in the
+    tree the gate has just built.
+    """
+    ours = _sorted_matches(results, COMBINED_GLOB)
+    written = ours[0] if ours else None
+    try:
+        from hypnose_behavior.io.layout import find_tracking_file
+    except Exception as exc:
+        return {"written": written.name if written else None,
+                "found": None, "agree": None, "error": str(exc)}
+
+    found = find_tracking_file(results, COMBINED_STEM)
+    found = Path(found) if found else None
+    return {
+        "written": written.name if written else None,
+        "found": found.name if found else None,
+        "agree": bool(written is not None and found == written),
+    }
+
+
+def check_combined_rows(fingerprint: dict) -> list[str]:
+    """L2's shape assertion: the combined table has as many rows as its parts.
+
+    Measured at Phase 0 on all four L2 fixtures (`docs/DECISIONS.md` section 4) -- the
+    join adds columns, not rows. So a row-count delta is a change in the join, which is
+    a different finding from the `time` values moving, and is worth separating.
+    """
+    combined = fingerprint.get("combined")
+    per_video = fingerprint.get("per_video")
+    if not isinstance(combined, dict) or not isinstance(per_video, dict):
+        return []
+    expected = sum(entry["rows"] for entry in per_video.values())
+    if combined["rows"] == expected:
+        return []
+    return [f"{combined['file']} has {combined['rows']:,} rows; its {len(per_video)} "
+            f"per-video table(s) sum to {expected:,}"]
+
+
 def check_quality_consistency(fingerprint: dict) -> list[str]:
     """L3's assertion: the report's ``centroid_nodes`` matches every parquet beside it.
 
@@ -275,14 +322,28 @@ def check_quality_consistency(fingerprint: dict) -> list[str]:
 
 # --- session fingerprint ---------------------------------------------------
 
+def default_rawdata(derivatives) -> Path:
+    """The rawdata root beside a derivatives root: ``E:\\derivatives`` -> ``E:\\rawdata``.
+
+    Derived from the fixture's own root rather than read from the active profile, so the
+    gate measures the tree `sessions.yml` names and needs neither ``HYPNOSE_*`` env vars
+    nor a ``cache_clear()``.
+    """
+    return Path(derivatives).parent / RAWDATA_DIRNAME
+
+
 @contextlib.contextmanager
-def _measured(results: Path, subjid, date, *, rederive: bool):
-    """The directory L1 and L3 are fingerprinted from.
+def _measured(results: Path, subjid, date, *, rederive: bool, levels, rawdata):
+    """The directory the fingerprinted levels are read from.
 
     ``rederive=False`` yields the saved results directory. Otherwise the session's
-    ``.slp`` files are copied into a temp tree and `extract_session` is run against
-    that -- it writes its parquet beside its input, so pointing it at the real tree
-    would overwrite the baselines.
+    ``.slp`` files are copied into a temp tree and the pipeline is run against that --
+    `extract` and `combine` both write beside their input, so pointing them at the real
+    tree would overwrite the baselines.
+
+    Only ``.slp`` is staged: `extract` writes its parquets into the temp tree and
+    `combine` reads them there, while the harp streams `combine` needs are read from the
+    real ``rawdata``. Nothing is written outside the temp tree.
     """
     if not rederive:
         yield results
@@ -299,35 +360,46 @@ def _measured(results: Path, subjid, date, *, rederive: bool):
         # claimed: `model=None` writes UNKNOWN_MODEL into the quality report.
         with contextlib.redirect_stdout(io.StringIO()):
             _extract_session(subjid, date, model=None, derivatives=deriv, skip_empty=True)
+            if "combined" in levels:
+                _combine_session(subjid, date, derivatives=deriv, rawdata=rawdata)
         yield staged
 
 
-def fingerprint_session(subjid, date, *, derivatives, levels=LEVELS, rederive=None) -> dict:
+def fingerprint_session(subjid, date, *, derivatives, levels=LEVELS, rederive=None,
+                        rawdata=None) -> dict:
     """Fingerprint one session across the requested `levels`.
 
     - a level not in ``levels`` records as ``"NOT BASELINED"``, which is distinct from
       `ABSENT` -- sub-066 has no combined parquet, and neither may read as the other;
-    - ``rederive`` defaults to `REDERIVE_AVAILABLE`: L1 and L3 then come from a fresh
+    - ``rederive`` defaults to `REDERIVE_AVAILABLE`: every level then comes from a fresh
       run into a temp tree rather than from the saved files;
-    - L2 always reads the saved tree, since `combine` has not moved yet.
+    - ``rawdata`` is where `combine` reads its harp streams from, defaulting to the
+      sibling of ``derivatives``. It is only ever read.
     """
     results = results_dir(derivatives, subjid, date)
     if rederive is None:
         rederive = REDERIVE_AVAILABLE
+    if rawdata is None:
+        rawdata = default_rawdata(derivatives)
 
     fingerprint: dict = {
         "results_dir": str(results),
         "inputs": fingerprint_inputs(results),
     }
-    with _measured(results, subjid, date, rederive=rederive) as measured:
+    with _measured(results, subjid, date, rederive=rederive, levels=levels,
+                   rawdata=rawdata) as measured:
         fingerprint["per_video"] = (
             fingerprint_per_video(measured) if "per_video" in levels else "NOT BASELINED"
         )
         fingerprint["combined"] = (
-            fingerprint_combined(results) if "combined" in levels else "NOT BASELINED"
+            fingerprint_combined(measured) if "combined" in levels else "NOT BASELINED"
         )
         fingerprint["quality"] = (
             fingerprint_quality(measured) if "quality" in levels else "NOT BASELINED"
+        )
+        fingerprint["discovery"] = (
+            check_discovery(measured) if rederive and "combined" in levels
+            else "NOT MEASURED"
         )
     return fingerprint
 

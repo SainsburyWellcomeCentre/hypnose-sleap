@@ -5,7 +5,7 @@ Fingerprints every session in ``sessions.yml`` at three levels and compares them
 against ``fixtures/*.json``. Exit 0 = GREEN, 1 = RED.
 
 - ``per_video`` (L1) -- must be byte-identical.
-- ``combined``  (L2) -- reported; the saved ``time`` column has an unfrozen input.
+- ``combined``  (L2) -- must be byte-identical, and hold as many rows as its parts.
 - ``quality``   (L3) -- checked for consistency with the parquets beside it.
 
 Usage
@@ -98,7 +98,7 @@ def generate(targets: set[str]) -> int:
             # Always `disk`: a baseline is what the saved files say, never a re-run.
             fp = _common.fingerprint_session(
                 subjid, date, derivatives=s["derivatives"], levels=s["levels"],
-                rederive=False,
+                rederive=False, rawdata=s.get("rawdata"),
             )
         except Exception as e:
             print(f"  [FAIL] {_key(subjid, date)} ({label}): {e}")
@@ -162,26 +162,59 @@ def _compare_per_video(expected: dict, got: dict, key: str, label: str) -> int:
     return red
 
 
-def _compare_combined(expected, got, key: str, label: str) -> int:
-    """L2. Reported as a delta, not asserted identical. Returns the RED count."""
+def _compare_combined(expected, got, fingerprint: dict, key: str, label: str) -> int:
+    """L2. Asserted byte-identical since Phase 4 measured the delta at zero.
+
+    Two separate complaints, because they mean different things: the row count must
+    equal the sum of the per-video tables (the join changed shape), and the md5 must
+    match (the values moved). A md5 mismatch has one upstream cause this repo does not
+    own -- `load_all_streams` -- so the RED names it.
+    """
+    red = 0
+    for complaint in _common.check_combined_rows(fingerprint):
+        print(f"  [RED]   {key} ({label}) combined: row count is not the sum of its parts")
+        print(f"        {complaint}")
+        red += 1
+
     if not isinstance(expected, dict):
         if expected == _common.ABSENT and isinstance(got, dict):
             print(f"  [RED]   {key} ({label}) combined: baseline is ABSENT, output has one")
-            return 1
+            return red + 1
         print(f"  [skip]  {key} ({label}) combined: not baselined")
-        return 0
+        return red
     if not isinstance(got, dict):
         print(f"  [RED]   {key} ({label}) combined: baseline has one, output is {got}")
-        return 1
+        return red + 1
     if expected["md5"] == got["md5"]:
         print(f"  [green] {key} ({label}) combined ok ({got['md5'][:8]})")
-        return 0
-    print(f"  [DELTA] {key} ({label}) combined: expected {expected['md5'][:8]} "
+        return red
+    print(f"  [RED]   {key} ({label}) combined: expected {expected['md5'][:8]} "
           f"got {got['md5'][:8]} ({expected['rows']} -> {got['rows']} rows)")
     for line in _common.diff_report("column", expected["columns"], got["columns"]):
         print(line)
-    print("        L2 is reported, not asserted -- record the delta in docs/DECISIONS.md.")
-    return 0
+    print("        L2 was byte-identical at Phase 4. A mismatch is either this repo or "
+          "hypnose_behavior.io.loaders.load_all_streams -- check fixtures/env.json first.")
+    return red + 1
+
+
+def _compare_discovery(got, key: str, label: str) -> int:
+    """Phase 4's gate: `hypnose_behavior` finds the combined parquet we just wrote.
+
+    An assertion about this run, not a comparison against a fixture -- the baselines
+    were written from disk, where nothing re-derived a file to look for.
+    """
+    if not isinstance(got, dict):
+        return 0
+    if got.get("error"):
+        print(f"  [skip]  {key} ({label}) discovery: hypnose_behavior not importable "
+              f"({got['error']})")
+        return 0
+    if got["agree"]:
+        print(f"  [green] {key} ({label}) discovery: find_tracking_file -> {got['found']}")
+        return 0
+    print(f"  [RED]   {key} ({label}) discovery: wrote {got['written']}, "
+          f"hypnose_behavior.io.layout.find_tracking_file returned {got['found']}")
+    return 1
 
 
 def _compare_quality(expected, got, fingerprint: dict, key: str, label: str) -> int:
@@ -219,6 +252,7 @@ def compare(targets: set[str]) -> int:
         try:
             got = _common.fingerprint_session(
                 subjid, date, derivatives=s["derivatives"], levels=s["levels"],
+                rawdata=s.get("rawdata"),
             )
         except Exception as e:
             print(f"  [ERROR] {key} ({label}): {e}")
@@ -227,14 +261,15 @@ def compare(targets: set[str]) -> int:
 
         _compare_inputs(expected.get("inputs", {}), got["inputs"], key, label)
         red += _compare_per_video(expected.get("per_video"), got["per_video"], key, label)
-        red += _compare_combined(expected.get("combined"), got["combined"], key, label)
+        red += _compare_combined(expected.get("combined"), got["combined"], got, key, label)
         red += _compare_quality(expected.get("quality"), got["quality"], got, key, label)
+        red += _compare_discovery(got.get("discovery"), key, label)
 
     print()
     if red:
         print(f"REGRESSION RED: {red} mismatch(es). See the lines above.")
         return 1
-    print("REGRESSION GREEN: L1 byte-identical, L3 consistent.")
+    print("REGRESSION GREEN: L1 and L2 byte-identical, L3 consistent.")
     if not _common.REDERIVE_AVAILABLE:
         print("  (disk source -- this GREEN says the fingerprinting is stable, "
               "not that the pipeline is.)")
