@@ -73,6 +73,11 @@ fastparquet — the engine that wrote them.
 Measured 2026-08-24: all five fixtures hash identically under fastparquet and pyarrow in
 one interpreter, so the fixtures survive the environment switch.
 
+`environment.lock.yml` is the full `sleap-analysis` environment those baselines were
+written under — a record, not an environment to build, kept beside them so a future RED
+can be attributed to the code rather than to the interpreter. `environment.yml` at the
+repo root builds the environment actually in use.
+
 ## Sessions
 
 `sessions.yml`, keyed `subjid:date`. Each entry may override `derivatives` and `levels`;

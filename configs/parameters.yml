@@ -12,3 +12,9 @@ gap_limit: 120
 
 # infer: sleap-track batch size.
 batch_size: 64
+
+# annotate: the overlay font. Leave unset and one is found -- the platform font
+# directories are searched for Arial, DejaVu, Liberation, FreeSans or Noto, then
+# matplotlib's bundled DejaVuSans. Set an absolute path here (or HYPNOSE_OVERLAY_FONT)
+# only to pin a specific face.
+# overlay_font: /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf

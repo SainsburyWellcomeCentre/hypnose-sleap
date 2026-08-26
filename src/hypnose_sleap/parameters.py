@@ -31,6 +31,8 @@ DEFAULTS = {
     "presence_frac": 0.7,
     "gap_limit": 120,
     "batch_size": 64,
+    # `annotate`'s overlay font. None means "find one" -- see `annotate.find_font`.
+    "overlay_font": None,
 }
 
 

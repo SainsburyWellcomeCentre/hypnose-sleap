@@ -33,5 +33,6 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 # regression.py resolves both package-relative, so an install without them has the
-# gate but not its baselines.
-"hypnose_sleap.qc" = ["fixtures/*.json", "sessions.yml"]
+# gate but not its baselines. The lock file travels with them: it is what the baselines
+# were produced under, and is only useful next to them.
+"hypnose_sleap.qc" = ["fixtures/*.json", "sessions.yml", "environment.lock.yml"]

@@ -165,11 +165,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("annotate", help="render an annotated overlay video")
     _add_session_selectors(p)
+    _add_dry_run(p)
+    _add_allow_remote(p)
+    _add_rawdata_from(p)
     p.add_argument("--rotate", type=int, default=0, choices=(0, 90, 180, 270))
     p.add_argument("--window", action="append", default=None,
                    help="clip to START-END relative to the video start, e.g. 0:00:00-0:10:00")
     p.add_argument("--video", action="append", default=None,
                    help="1-based video number(s) to render; default all")
+    p.add_argument("--mark", default=None, metavar="HH:MM:SS",
+                   help="mark this clock time with a triangle for two seconds")
+    p.add_argument("--reward-display", dest="reward_display", type=float, default=1.0,
+                   help="seconds to show a reward marker after a supply-port pulse")
 
     return parser
 
@@ -268,6 +275,94 @@ def _dry_run_infer(tasks, args) -> int:
     print(f"\n  {total} video(s), model {model}, "
           f"batch_size {parameters.resolve('batch_size', args.batch_size)}")
     return 0
+
+
+def _parse_windows(values):
+    """``--window 0:00:00-0:10:00`` (repeatable) as the pairs `annotate` expects.
+
+    None when the flag was never given, which renders the full video.
+    """
+    if not values:
+        return None
+    windows = []
+    for value in values:
+        parts = str(value).split("-")
+        if len(parts) != 2:
+            raise SystemExit(
+                f"--window must be START-END, e.g. 0:00:00-0:10:00 (got {value!r})"
+            )
+        windows.append((parts[0].strip(), parts[1].strip()))
+    return windows
+
+
+def _parse_videos(values):
+    """``--video 2`` / ``--video 2,3`` as 1-based numbers, or None for all."""
+    if not values:
+        return None
+    numbers = []
+    for value in values:
+        for part in str(value).split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if not part.isdigit():
+                raise SystemExit(f"--video takes 1-based numbers (got {part!r})")
+            numbers.append(int(part))
+    return numbers or None
+
+
+def _run_annotate(args) -> int:
+    """`annotate`: render every selected session's overlay videos.
+
+    Fenced by `require_local` like the other writing verbs. A rendered clip is tens of
+    MB and belongs on local disk; until now this was the one writer that would put one
+    straight onto the server.
+    """
+    from hypnose_sleap.io import layout, paths
+
+    paths.require_local("annotate", allow_remote=args.allow_remote, profile=args.profile)
+    roots = _roots(args)
+    sessions_layout = layout.layout_for(roots["derivatives"])
+    windows = _parse_windows(args.window)
+    videos = _parse_videos(args.video)
+
+    tasks = []
+    for subjid in _subjects(sessions_layout, args):
+        if sessions_layout.subject_dir(subjid, missing_ok=True) is None:
+            print(f"Subject {subjid:02d}: no subject directory found under {sessions_layout.root}")
+            continue
+        for session in sessions_layout.find_sessions(subjid, ses=args.ses, date=_join(args.date)):
+            results = layout.results_dir(session)
+            if layout.find_combined_table(results) is None:
+                print(f"Subject {subjid:02d} Date {session.date}: no combined table, skipping")
+                continue
+            tasks.append(session)
+
+    if args.dry_run:
+        print(f"\nannotate --dry-run: {len(tasks)} session(s) would render "
+              f"{len(windows) if windows else 1} clip(s) per video:")
+        for session in tasks:
+            print(f"  sub-{int(session.subjid):03d} date-{session.date}"
+                  f"   -> {layout.results_dir(session)}")
+        return 0
+
+    from hypnose_sleap.annotate import annotate_session
+
+    failed = 0
+    for session in tasks:
+        try:
+            annotate_session(
+                int(session.subjid), session.date,
+                derivatives=roots["derivatives"], rawdata=roots["rawdata"],
+                rotate_deg=args.rotate, time_window=windows, video_indices=videos,
+                reward_display_s=args.reward_display, mark_timepoint=args.mark,
+            )
+        except Exception as exc:
+            print(f"  Failed sub-{int(session.subjid):03d} date-{session.date}: {exc}")
+            failed += 1
+
+    print(f"\nSummary: {len(tasks) - failed}/{len(tasks)} session(s) rendered.")
+    return 1 if failed else 0
 
 
 # --- the session driver ----------------------------------------------------
@@ -446,10 +541,10 @@ def main(argv=None) -> int:
         from hypnose_sleap.io.transfer import transfer
         return transfer(args.verb, args)
 
-    raise SystemExit(
-        f"`{args.verb}` is not implemented yet -- hypnose-sleap is mid-restructure.\n"
-        f"See docs/restructure-plan.md for which phase lands it."
-    )
+    if args.verb == "annotate":
+        return _run_annotate(args)
+
+    raise SystemExit(f"`{args.verb}` is not a known verb. Try --help.")
 
 
 if __name__ == "__main__":

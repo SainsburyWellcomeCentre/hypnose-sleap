@@ -8,6 +8,10 @@ fingerprints against ``fixtures/``.
 - GREEN -- the environment is transparent; the restructure gates against ``fixtures/``.
 - RED   -- a characterised environment delta, before any code moved. ``--write-newenv``
   records it as ``fixtures/<session>.newenv.json`` for the restructure to gate against.
+- SKIP  -- ``sleap_utils.py`` is gone. Phase 7 deletes it, which retires this script:
+  its subject is *old code*, and the answer it produced is `DECISIONS.md` §8. Check out
+  a commit before the deletion to repeat it. `regression.py` is the standing check that
+  the current code still re-derives the baselines.
 
 The real derivatives tree is only read. Each session's ``.slp`` files are copied into a
 temp tree and the extractor is pointed at that, because the extractor writes its parquet
@@ -52,6 +56,17 @@ def _extractor():
     """The repointed `sleap_labels_and_centroid`, imported late so ``--help`` works."""
     from sleap_utils import sleap_labels_and_centroid
     return sleap_labels_and_centroid
+
+
+def _subject_available() -> bool:
+    """Whether the pre-restructure module this experiment measures still exists.
+
+    Phase 7 deletes it, which retires this script by design: it exists to compare *old
+    code* across two environments, and there is no old code any more. Reporting that as
+    RED would claim the environment stopped being transparent, which is the opposite of
+    what a missing subject means.
+    """
+    return (REPO / "sleap_utils.py").is_file()
 
 
 def _stage(results: Path, tmp: Path) -> Path:
@@ -168,6 +183,14 @@ def main(argv=None) -> int:
     env = _common.env_fingerprint()
     baseline = json.loads((FIXTURES / "env.json").read_text())
     _print_env_table(baseline, env)
+
+    if not _subject_available():
+        print("SKIP -- sleap_utils.py is gone (Phase 7), so there is no pre-restructure\n"
+              "  code left to re-derive from. This experiment ran once and is recorded in\n"
+              "  docs/DECISIONS.md section 8: 16/16 per-video parquets byte-identical.\n"
+              "  To repeat it, check out a commit before the deletion. The ongoing check\n"
+              "  that the current code still re-derives the baselines is qc/regression.py.")
+        return 0
 
     red = 0
     for s in _load_sessions(set(args.targets)):

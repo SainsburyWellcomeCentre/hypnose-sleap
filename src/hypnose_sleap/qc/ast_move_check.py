@@ -51,6 +51,38 @@ def _rel(path: Path) -> str:
         return str(path)
 
 
+def _exists_at_ref(ref: str, relpath: str) -> bool:
+    return subprocess.run(
+        ["git", "-C", str(REPO), "cat-file", "-e", f"{ref}:{relpath}"],
+        capture_output=True,
+    ).returncode == 0
+
+
+def resolve_base(ref: str, relpath: str) -> str:
+    """``ref``, or the last commit that still held ``relpath``.
+
+    Phase 7 deletes `sleap_utils.py`, which would leave ``--base HEAD`` reading a
+    commit where the pre-split file no longer exists -- retiring the check exactly when
+    it becomes the only record that the split was a move. So a missing file walks back
+    to its deleting commit's parent instead of failing.
+    """
+    if _exists_at_ref(ref, relpath):
+        return ref
+    proc = subprocess.run(
+        ["git", "-C", str(REPO), "log", "-1", "--format=%H", ref, "--", relpath],
+        capture_output=True, text=True,
+    )
+    deleted_in = proc.stdout.strip()
+    if not deleted_in:
+        raise SystemExit(f"{relpath} is not at {ref} and no commit touching it was found")
+    resolved = f"{deleted_in}^"
+    if not _exists_at_ref(resolved, relpath):
+        raise SystemExit(f"cannot find a commit holding {relpath} at or before {ref}")
+    print(f"{DIM}  {relpath} is gone at {ref}; reading it at {resolved} "
+          f"({deleted_in[:8]}^){RESET}")
+    return resolved
+
+
 def _read_at_ref(ref: str, relpath: str) -> str:
     """Read a file's contents at a git ref. Raises SystemExit if it is not there."""
     proc = subprocess.run(
@@ -180,6 +212,7 @@ def main(argv=None) -> int:
     news = sorted(set(p.resolve() for p in news))
 
     # --- before ---------------------------------------------------------
+    args.base = resolve_base(args.base, olds[0])
     before: dict[str, dict] = {}
     before_consts: dict[str, str] = {}
     for relpath in olds:

@@ -14,8 +14,9 @@ Measurements and choices made during the restructure. Bullets, one fact each.
 - `hypnose` 1.0.0 is absent from every env on the machine, so `sleap_utils.py` cannot
   run. The baseline is the saved `.parquet` files, as planned — it could not have been
   re-derived.
-- Captured verbatim as `environment.lock.yml`, minus `prefix:` and the
-  `hypnose-analysis==1.0.0` pip line.
+- Captured verbatim as `qc/environment.lock.yml`, minus `prefix:` and the
+  `hypnose-analysis==1.0.0` pip line. (Moved there from the repo root at Phase 7: it is
+  the provenance of `qc/fixtures/`, not an environment to build — §14.)
 
 ## 2 — Parquet engine does not move the fingerprint
 
@@ -567,3 +568,138 @@ remain in git history.
 
 `annotate` has no `--allow-remote` and does not call `require_local`, so it will render
 an `.mp4` onto ceph if that is the active profile. It is the one unguarded writer left.
+
+## 14 — Phases 6 and 7: annotate moved byte-identically, and the old module is gone
+
+Done 2026-08-26. The restructure is complete.
+
+### The gate is stronger than the plan asked for
+
+The plan wanted "frame count and a sample of frame hashes match a kept reference clip if
+one exists". Eight reference clips do exist — and neither half of that comparison was
+usable as written:
+
+- they were rendered **2026-07-07 under `sleap-analysis`**, which carries opencv 4.11.0
+  against 5.0.0 here, so encoded bytes could differ for encoder reasons alone;
+- **nothing recorded which time window produced them.** The filename carries the
+  rotation and `_window1`, not the bounds. `sleap_analysis.ipynb` cell 7 held an
+  `annotate` call for a *different* session, so the parameters are unrecoverable.
+
+⇒ the baseline was **rendered, not assumed**: the same session, window, and rotation
+through the old `sleap_utils.annotate_videos_with_sleap_and_trials` and through the new
+`annotate.annotate_session`, in one environment, with the code as the only variable —
+the Phase 0.5 method.
+
+**Result: byte-identical `.mp4`, at both rotations in use.**
+
+| clip | frames | size | md5 |
+| --- | --- | --- | --- |
+| `rotate_deg=90` | 1200 | 1024x1280 | `dc39ba83` both |
+| `rotate_deg=0` | 1200 | 1280x1024 | `5a54bb1a` both |
+
+Session `057:20260529`, video 1, window `00:01:00–00:01:20`. All three overlay elements
+were exercised in it, checked by decoding the baseline and counting coloured pixels:
+centroid in 1200/1200 frames, odour text in 100, reward text in 120. 180 and 270 are not
+gated — they are not used.
+
+`qc/check_annotate.py` is the gate, and keeps the pre-registered fallback: if a future
+encoder makes bytes differ, it compares decoded overlay *geometry* — the centroid
+marker's centre and the odour/reward text masks, to 1 px — because that is what this
+repo computes and encoding is opencv's.
+
+The gate clips were written into the real derivatives tree under `qcgate*` names and
+deleted afterwards; the eight kept references were not touched.
+
+### Three dead things in the old renderer, removed
+
+- **`:918` `behavior = load_session_results(subjid, date)`** — assigned, never read. A
+  whole session's results loaded per render, for nothing.
+- **`:1092` `font_large`** — a 100 px face loaded beside the 60 px one; only
+  `font_small` ever reaches a `draw.text`.
+- **`:1273-1274` `br_y -= 20`** — adjusts the reward-text y *after* the `draw.text` that
+  used it, so the value is discarded at the next loop iteration.
+
+None can move a pixel, which the byte-identical result confirms.
+
+### The font is resolved, not hard-coded
+
+The old code tried `C:/Windows/Fonts/arial.ttf`, then a macOS path, then PIL's *bitmap*
+default — so on Linux the overlay silently dropped from 60 px to a few px rather than
+failing. `annotate.find_font` searches the platform font directories for Arial, DejaVu,
+Liberation, FreeSans or Noto, then matplotlib's bundled `DejaVuSans.ttf` (present
+wherever this stack is), then `ImageFont.load_default(size=...)`, which Pillow ≥10.1
+makes scalable. `HYPNOSE_OVERLAY_FONT` and `overlay_font` in `parameters.yml` pin a face.
+
+Arial leads the candidate list, so a Windows machine resolves exactly what the old code
+did — verified: `C:\Windows\Fonts\arial.ttf` at size 60. That is why the gate could be
+byte-identical while the resolution changed underneath it.
+
+### `annotate` is fenced, closing the item Phase 5 carried
+
+It now takes `--allow-remote` and calls `require_local`, like the other writing verbs —
+confirmed by `--profile server-windows annotate` exiting 1. Until this phase it was the
+one writer that would render a clip straight onto ceph. It also gained `--dry-run`,
+`--rawdata-from`, `--mark` and `--reward-display`, so the verb can express what the
+function does.
+
+Not changed: a re-render overwrites a clip of the same name. `cv2.VideoWriter` truncates,
+as it always did. Unlike `push`, which now refuses without `--force`, this is left alone
+— it is the old behaviour, and `output_suffix` already distinguishes runs.
+
+### The notebook is 11 cells
+
+22 → 11. Kept: the pipeline calls against the new API, the quality report, the annotate
+call, and the `.slp` frame inspection (plan's cell 20) verbatim — the natural seed for a
+`peek` verb. The header now maps every call to its verb, because the command line is the
+primary interface and the notebook is for poking at one session.
+
+Cells 10–19 were harp-stream and clock-correction debugging — `hypnose-behavior`'s
+subject, not SLEAP's. The plan offered "move to `hypnose-behavior/notebooks/` or go", and
+**they go**: those functions are retired, and git history of this repo is where to find
+them if they are ever wanted. They were already broken here anyway — several still import
+`hypnose.trial_classification.classification_utils`, renamed to
+`hypnose_behavior.io.loaders` at Phase 0.5.
+
+### Two QC scripts read the file Phase 7 deletes
+
+Both had to be handled, and they wanted opposite answers.
+
+`ast_move_check` **survives**: `--base` defaults to HEAD and reads the pre-split file
+with `git show`, so the first commit after the deletion would have retired the check
+exactly when it becomes the only record that the split was a move. `resolve_base` now
+walks back to the deleting commit's parent and says so, so it keeps working with no
+arguments.
+
+`env_experiment` **retires**, and had to be taught to say so. It re-derives the fixtures
+by *running* `sleap_utils.sleap_labels_and_centroid`, so with the module gone it reported
+`ModuleNotFoundError` per session and concluded **"PHASE 0.5 RED: the environment is NOT
+transparent"** — exactly backwards. Its subject is old code, and there is none; the
+experiment ran once and its answer is §8. It now SKIPs with that pointer and exits 0.
+`regression.py` is the standing check that current code still re-derives the baselines.
+
+The general point: a gate whose input a later phase deletes will not fail loudly, it will
+fail *misleadingly*. Both were caught by running the whole suite after the deletion rather
+than before it.
+
+Still 5/5 byte-identical. The annotate helpers are **not** claimed as byte-identical
+moves — they gained docstrings in the house style, so they sit in the ADDED bucket.
+Their proof is the identical render, which is the stronger claim for a renderer anyway.
+
+### Phase 7
+
+Deleted: `sleap_utils.py` (1631 lines, the last of the pre-restructure module), `models/`
+(46 MB), the 71 MB label `.slp`, and `__pycache__/`. The last three were already
+git-ignored and untracked — Phase 1's `git rm --cached` did that — so this was 117 MB of
+local disk, not history.
+
+**Kept, and moved: `environment.lock.yml` -> `src/hypnose_sleap/qc/`.** It is the record
+of the `sleap-analysis` environment that produced every baseline parquet in
+`qc/fixtures/`, which `regression.py` still gates against, so a future fixture RED can be
+attributed to code rather than environment. At the repo root it sat beside
+`environment.yml` and read as a second buildable environment; beside the fixtures it
+reads as their provenance, which is what it is. It ships as `qc` package data for the
+same reason the fixtures do.
+
+`hypnose-behavior/docs/TODO.md`'s `sleap-hypnose` item is struck: the ordering constraint
+it described ("run the SLEAP steps before migrating a session") is lifted, because the
+flat-layout globs it named lived in `sleap_utils.py`, which no longer exists.

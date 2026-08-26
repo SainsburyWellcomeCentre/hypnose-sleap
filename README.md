@@ -99,6 +99,25 @@ provenance as unknown rather than claiming the configured default wrote the `.sl
 re-combining after local `rawdata` has been deleted. It is never the default: the main
 loop stays off the network.
 
+## Annotate
+
+Centroid overlay, the active odour near the poke port, and reward markers after each
+supply-port pulse.
+
+```bash
+hypnose-sleap annotate --dry-run -s 57
+hypnose-sleap annotate -s 57 -d 20260717 --rotate 90 --window 0:05:00-0:07:00
+hypnose-sleap annotate -s 57 -d 20260717 --video 1 --video 2 --mark 11:33:11
+```
+
+`--window` is relative to the video's first frame and repeatable; each window writes its
+own `.mp4` beside the session's tables. A re-render overwrites a clip of the same name.
+
+The overlay font is resolved, not hard-coded: the platform font directories are searched
+for Arial, DejaVu, Liberation, FreeSans or Noto, then matplotlib's bundled DejaVuSans,
+then Pillow's default. Set `overlay_font` in `configs/parameters.yml` or
+`HYPNOSE_OVERLAY_FONT` only to pin a particular face.
+
 ## Convert videos from .avi to .mp4 for SLEAP (model training and labeling)
 
 On the Analysis PC, PowerShell loads the conversion script via the PowerShell profile.
@@ -117,6 +136,7 @@ python -m hypnose_sleap.qc.regression        # L1/L2 byte-identity against the b
 python -m hypnose_sleap.qc.check_layout      # hypnose-behavior can find what we write
 python -m hypnose_sleap.qc.check_transfer    # dry-run is read-only, overwrites need --force
 python -m hypnose_sleap.qc.ast_move_check    # the moved numerics are provably a move
+python -m hypnose_sleap.qc.check_annotate OLD.mp4 NEW.mp4   # two renders draw the same overlay
 ```
 
 `docs/restructure-plan.md` is the plan; `docs/DECISIONS.md` records what was measured

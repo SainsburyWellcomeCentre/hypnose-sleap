@@ -86,7 +86,8 @@ Changed upstream in `56dad6b` / `14d93b3` (from the PC), after the first draft o
 
 - Commit `sleap-analysis-environment.yml` as `environment.lock.yml` — the record of the env that
   produced every baseline parquet. Strip the `prefix:` line and the `hypnose-analysis==1.0.0` pip
-  line (local install; pip would look on PyPI and fail).
+  line (local install; pip would look on PyPI and fail). *(Phase 7 moved it to
+  `src/hypnose_sleap/qc/`, beside the fixtures whose provenance it is.)*
 - Hand-write `environment.yml` for the new env: name `hypnose-sleap`, `python=3.12`, `sleap`,
   `sleap-io`, `pyarrow`, `fastparquet`, `pandas`, `numpy<2`, `h5py`, `opencv`, `pyyaml`, `tqdm`,
   `harp-python`, `swc-aeon`, `-e ../hypnose-helpers`, `-e ../hypnose-behavior`, `-e .`.
@@ -262,7 +263,7 @@ Four differences:
   (no pyarrow) / sleap-io 0.5.7 / sleap 1.5.2.
 - Read a baseline with the engine that wrote it — otherwise a dtype round-trip enters the
   fingerprint and a RED cannot separate "the code changed" from "the reader did".
-- After Phase 0.5 `env.json` records the new env; `environment.lock.yml` keeps the old one.
+- After Phase 0.5 `env.json` records the new env; `qc/environment.lock.yml` keeps the old one.
 
 Fixture sessions — two, each needing `.slp` + per-video parquets + combined parquet present:
 
@@ -385,8 +386,21 @@ is a SLEAP question, and is the natural seed for a `peek` verb.
 *Gate:* one clip renders end to end; frame count and a sample of frame hashes match a kept
 reference clip if one exists.
 
+Done 2026-08-26. GREEN, and stronger than asked: the kept clips could not be the baseline
+(rendered under opencv 4.11 vs 5.0 here, and nothing recorded their time window), so the
+baseline was **rendered** — old code and new code, same session, same window, one
+environment. **Byte-identical `.mp4` at both rotations in use** (0 and 90), with the
+centroid, odour and reward overlays all exercised. `qc/check_annotate.py`. `annotate` now
+calls `require_local`, closing the unguarded writer Phase 5 carried. `DECISIONS.md` §14.
+
 **7 — cleanup.** Delete `sleap_utils.py`, `models/`, the label `.slp`, `__pycache__/`. Strike the
 `sleap-hypnose` item from `hypnose-behavior/docs/TODO.md`. Open `docs/DECISIONS.md`.
+
+Done 2026-08-26. 117 MB freed; `models/` and the label `.slp` were already untracked, so only
+`sleap_utils.py` (1631 lines) left history. `environment.lock.yml` moved to
+`src/hypnose_sleap/qc/` rather than being deleted — it is the provenance of the fixtures
+`regression.py` still gates against. `ast_move_check` gained `resolve_base` so deleting its
+subject does not retire it. **The restructure is complete.**
 
 ---
 
