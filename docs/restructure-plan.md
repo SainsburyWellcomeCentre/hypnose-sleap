@@ -349,6 +349,17 @@ and `require_local` on `infer` (the flag exists, nothing calls it yet).
 `push --dry-run` plans the same file set as `transfer_sleap_results.ps1 -DryRun` on the same
 filters, and every destination it names is under `get_derivatives_root()`.
 
+Done 2026-08-26. Both gates GREEN: `infer --dry-run` lists the same **545** videos with the
+same 545 `.slp` names, differing only by the Phase 3 `movement_analysis/` grouping;
+`push --dry-run` plans the same **296** files, every destination under the resolved
+derivatives root. `DECISIONS.md` §13.
+
+The §7 environment question was answered a third way: `infer` calls `sleap-gpu`'s
+`sleap-track.exe` as a **subprocess**, as the bash script did, so neither environment
+changed and no pin moved. `qc/check_transfer.py` now asserts the three `push` defects
+stay fixed. Five scripts retired, not four — `submit_sleap_inference.sh` sourced
+`run_sleap_inference.sh`, and `run_sleap_inference.sh` could not have run as written.
+
 Decided before starting:
 
 - `fetch` copies the whole `behav/<exp>/` tree (Q3), not `.avi` only.

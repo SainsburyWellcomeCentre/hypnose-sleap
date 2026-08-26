@@ -1,101 +1,123 @@
-# SLEAP Inference Local Runner
+# hypnose-sleap
 
-This Repository contains a lightweight bash utility to automatically run SLEAP inference with a pre-trained model across multiple subjects and sessions.
+SLEAP pose tracking for hypnose experiments: inference, centroid extraction, timestamp
+alignment and annotated video, behind one command line.
 
-Output predictions are saved per video in the respective derivatives folder. 
+```
+hypnose-sleap fetch    remote rawdata behav/ tree     -> local rawdata
+hypnose-sleap infer    local .avi + a model role      -> .predictions.slp
+hypnose-sleap extract  .slp                           -> per-video parquet + quality .yml
+hypnose-sleap combine  per-video parquet + harp       -> combined parquet
+hypnose-sleap run      extract + combine, one process
+hypnose-sleap push     local derivatives              -> remote derivatives
+hypnose-sleap annotate .avi + combined parquet        -> annotated .mp4
+```
 
-## Quick Start
+The whole loop runs on local disk: `fetch` -> `infer` -> `run` -> `push`. Only `fetch`
+and `push` touch the server, and the writing verbs refuse a profile marked
+`remote: true` without `--allow-remote`. Nothing deletes anything.
 
-clone this repository 
+Every verb takes the same selectors: `-s 57`, `-s 57,58`, `-d 20260717`,
+`-d 20260601-20260630`, `--ses 12-20`. Every verb takes `--dry-run`.
 
-create a sleap environment using v1.3.3.
+## Quick start
 
-conda creae -n sleap -c conda-forge -c sleap sleap=1.3.3
+```bash
+conda env create -f environment.yml
+conda activate hypnose-sleap
+hypnose-set-data-location local_1     # or server-windows; --list to see them
+hypnose-sleap --help
+```
 
-Make the script executable: 
-chmod +x run_sleap_inference_local.sh
+`configs/data_locations.yml` holds the profiles and the `transfer:` endpoints;
+`configs/models.yml` maps model roles to directories; `configs/parameters.yml` holds the
+pipeline defaults every saved baseline was produced with. The three `*.local.yml` files
+beside them are per-machine and git-ignored.
 
-Create a symlink for global function call
-sudo ln -s ~/path/to/directory/run_sleap_inference_local.sh /usr/local/bin/run_sleap_inference_local
+## Inference
 
-Adjust Base Directory and Model Path to your directory
+`infer` runs `sleap-track` as a subprocess. Its backend (torch, sleap-nn, lightning,
+kornia) lives in the `sleap-gpu` environment, not in `hypnose-sleap`, so point at it
+once in `configs/inference.local.yml`:
+
+```yaml
+sleap_track: 'C:\Users\HarrisLab\.conda\envs\sleap-gpu\Scripts\sleap-track.exe'
+```
+
+`HYPNOSE_SLEAP_TRACK` overrides it, and `sleap-track` on `PATH` is the fallback — which
+is what an already-activated `sleap-gpu` shell gets for free.
+
+```bash
+hypnose-sleap infer -s 57 --dry-run           # every video, and where its .slp lands
+hypnose-sleap infer -s 57 -d 20260717         # one session
+hypnose-sleap infer -s 57 -m eeg_headstage    # a model role, or an explicit path
+hypnose-sleap infer -s 57 -bz 32              # override the configured batch size
+hypnose-sleap infer -s 57 --recompute         # re-run videos that already have a .slp
+```
+
+Output goes to `<derivatives>/sub-XXX_id-YYY/ses-NNN_date-YYYYMMDD/saved_analysis_results/movement_analysis/<behav>__<video>.predictions.slp`.
+The `<behav>__` prefix keeps identical video basenames from different `behav/` folders
+apart, which happens whenever a session was restarted within the same hour. Videos that
+already have a `.slp` are skipped unless `--recompute`.
+
+The model defaults to the `naive` role in `configs/models.yml` rather than to a path.
+
+## Transfer
+
+`fetch` copies the whole `behav/<exp>/` tree, not the `.avi` alone: `combine` reads
+`VideoData/*.csv` and the harp streams under `Behavior/`, and their absence degrades the
+`time` column silently instead of raising. The extra streams are 1.3 % of a session.
+
+`push` copies the per-video tables, the combined table and the quality report. Both
+plan before they write, so `--dry-run` creates nothing, and `push` refuses to overwrite
+an existing destination without `--force`.
+
+```bash
+hypnose-sleap fetch --dry-run -s 57 -d 20260717
+hypnose-sleap fetch -s 57 -d 20260717
+hypnose-sleap push --dry-run                       # the whole local derivatives tree
+hypnose-sleap push -s 45,46,47
+hypnose-sleap push -d 20260213,20260217-20260220
+hypnose-sleap push -s 45 -d 20260213-20260220 --force
+```
+
+Endpoints come from the `transfer:` block in `configs/data_locations.yml`; `--from` and
+`--to` override either end by profile name.
+
+## Extract, combine, run
+
+```bash
+hypnose-sleap run -s 57 -m eeg_headstage        # extract then combine
+hypnose-sleap extract -s 57 --recompute
+hypnose-sleap combine -s 57 --rawdata-from server-windows
+```
+
+`--model` is optional but never guessed: omitting it records the quality report's
+provenance as unknown rather than claiming the configured default wrote the `.slp`.
+
+`--rawdata-from <profile>` reads the harp streams from another profile — for
+re-combining after local `rawdata` has been deleted. It is never the default: the main
+loop stays off the network.
 
 ## Convert videos from .avi to .mp4 for SLEAP (model training and labeling)
 
-On Analysis PC, powershell automatically loads the conversion script via the PowerShell Profile
-- To configure or change path, run 'notepad $PROFILE' and update path to the file. Refresh profile with '. $PROFILE' or restart powershell
-- Once configured, the function is available from anywhere in PowerShell
-- Run convert-avitomp4 "file\path\to\file.avi". Works with single or multiple files ("file\one.avi" "file\two.avi")
-- Outputs are currently written to E:\videos_sleap_models
-- Encoding uses NVIDIA NVENC (h264_nvenc, preset p7, CQ18)
+On the Analysis PC, PowerShell loads the conversion script via the PowerShell profile.
 
-## Run Inference
+- To configure or change the path, run `notepad $PROFILE` and update the path to the
+  file. Refresh with `. $PROFILE` or restart PowerShell.
+- Once configured, the function is available from anywhere in PowerShell.
+- Run `convert-avitomp4 "file\path\to\file.avi"`. Works with single or multiple files.
+- Outputs are written to `E:\videos_sleap_models`.
+- Encoding uses NVIDIA NVENC (h264_nvenc, preset p7, CQ18).
 
-run_sleap_inference_local -s XXX -d YYYYMMDD 
+## Quality control
 
-For Windows: 
-In GitBash Terminal run: $ bash run_sleap_inference_local_windows.sh -s XX -b E: -bz 64
-
-### Defaults
-- Model: `C:/Users/HarrisLab/Desktop/Repos/sleap-models/sleap_v1.5.5_new_model/models/run_trial2_251205_181823.single_instance.n=150`
-- Base data root: `Z:/hypnose`
-- Derivatives root: `${BASE_DIR}/derivatives`
-- Batch size: `64`
-- Video glob: `*.avi`
-- If `BASE_DIR` is the default and `E:/rawdata` exists, it automatically switches to `E:/` to use a local copy.
-
-
-### Arguments
-- `-s, --subject <SUBJ ...>`: One or more subject IDs (e.g., `40` or `038`). Padding to three digits is handled internally. Repeat -s for each subject (-s 38 -s 40)
-- `-d, --date <DATE|DATE_RANGE ...>`: Zero or more dates. Accepts `YYYYMMDD` or ranges `YYYYMMDD-YYYYMMDD` (inclusive). If omitted, the script discovers all dates present for each subject under `<BASE_DIR>/rawdata/sub-XXX_*`.
-- `-m, --model <PATH>`: Override model path.
-- `-b, --base-dir <PATH>`: Override base data root (expects `rawdata/...`).
-- `-bz, --batch-size <N>`: Override batch size for `sleap-track`.
-
-### Usage Examples
-- Single subject/date with defaults:
-    - `bash run_sleap_inference_local_windows.sh -s 038 -d 20251119`
-- Multiple subjects and dates:
-    - `bash run_sleap_inference_local_windows.sh -s 038 039 -d 20251029 20251030`
-- Date range and custom model/base:
-    - `bash run_sleap_inference_local_windows.sh -s 040 -d 20251101-20251105 -m D:/models/custom.slp -b E:`
-- Custom batch size:
-    - `bash run_sleap_inference_local_windows.sh -s 040 -d 20251125 -bz 32`
-
-
-## For HPC: 
-
-Clone repo on the HPC. Make scripts executable using:
-    chmod +x run_sleap_inference.sh
-    chmod +x submit_sleap_inference.sh
-
-Submit job: 
-    - cd into the hypnose-sleap folder containing the scripts
-    - run: ./submit_sleap_inference.sh -s 40 -d 20251128 -m ./models/251031_100645.single_instance.n=160
-
-## Transfer SLEAP results locally
-
-Use the PowerShell helper [transfer_sleap_results.ps1] to copy tracking CSVs from a local run (defaults to E:/derivatives) to mounted server (defaults to Z:/hypnose/derivatives) while preserving the folder structure.
-
-- Matches files containing sleap_tracking_video or combined_sleap_tracking_timestamps
-- Preserves sub-XXX/ses-XXX_date-YYYYMMDD/saved_analysis_results layout
-- Optional filters: subjects via -Sub, dates or date ranges via -Date
-
-Examples (run from this folder in PowerShell):
-
+```bash
+python -m hypnose_sleap.qc.regression        # L1/L2 byte-identity against the baselines
+python -m hypnose_sleap.qc.check_layout      # hypnose-behavior can find what we write
+python -m hypnose_sleap.qc.check_transfer    # dry-run is read-only, overwrites need --force
+python -m hypnose_sleap.qc.ast_move_check    # the moved numerics are provably a move
 ```
-# Preview without copying and show what files are skipped (usually .slp files) 
-./transfer_sleap_results.ps1 -DryRun -ShowSkipped
 
-# Copy everything matching the patterns
-./transfer_sleap_results.ps1
-
-# Copy only specific subjects
-./transfer_sleap_results.ps1 -Sub 45,46,47
-
-# Copy specific dates and/or a range (inclusive)
-./transfer_sleap_results.ps1 -Date 20260213,20260217-20260220
-
-# Combine subject and date filters
-./transfer_sleap_results.ps1 -Sub 45 -Date 20260213-20260220
-```
+`docs/restructure-plan.md` is the plan; `docs/DECISIONS.md` records what was measured
+and why each choice was made.

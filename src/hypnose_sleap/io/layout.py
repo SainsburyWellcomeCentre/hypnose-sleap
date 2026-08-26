@@ -66,6 +66,19 @@ def layout_for(root=None, *, name: str = "derivatives") -> SessionLayout:
     return SessionLayout(root, name=name, subject_pattern=SUBJECT_PATTERN)
 
 
+def mirror_session(session, root=None, *, name: str = "derivatives") -> Path:
+    """The same session's directory under another root, whether or not it exists.
+
+    `infer` reads videos out of a rawdata session and writes into the matching
+    derivatives one, which on a first run does not exist yet -- so the path is composed
+    from the subject and session directory names rather than looked up. Those two names
+    are shared by both trees, which is what ``${DERIV_DIR}/${SUBJ_DIR_NAME}/
+    ${SESS_DIR_NAME}`` relied on too.
+    """
+    session_path = Path(getattr(session, "path", session))
+    return layout_for(root, name=name).root / session_path.parent.name / session_path.name
+
+
 def results_dir(session) -> Path:
     """The analysis-output directory of a session directory or a `SessionRef`.
 
@@ -192,7 +205,8 @@ __all__ = [
     "rawdata", "derivatives", "layout_for", "SUBJECT_PATTERN",
     "RESULTS_DIRNAME", "MOVEMENT_SUBFOLDER", "VIDEO_GLOB",
     "TRACKING_STEM_GLOB", "COMBINED_STEM_GLOB",
-    "results_dir", "movement_dir", "write_path", "find_outputs", "find_output",
+    "mirror_session", "results_dir", "movement_dir", "write_path",
+    "find_outputs", "find_output",
     "find_tables", "find_tracking_tables", "find_combined_table",
     "video_key", "session_videos", "session_experiments",
     "SessionRef", "SessionLayout", "DuplicateSessionError",

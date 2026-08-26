@@ -418,3 +418,152 @@ Measurements and choices made during the restructure. Bullets, one fact each.
 - `--profile` resolves a named profile into `derivatives=` / `rawdata=` overrides. It
   never calls `set_active`: choosing a profile for one command must not rewrite the
   machine's `data_locations.local.yml`.
+
+## 13 — Phase 5: infer, fetch, push; five scripts retired
+
+Done 2026-08-26. Both gates GREEN, captured before any code was written.
+
+### The gate
+
+- **`infer --dry-run` = the old walk, exactly.** 545 videos on both sides, 0 only-in-old,
+  0 only-in-new, and all 545 `.slp` leaf names identical. The only difference is the
+  directory: all 545 move from flat `saved_analysis_results/` into `movement_analysis/`,
+  which is the Phase 3 grouping. The baseline was captured by lifting the discovery half
+  of `run_sleap_inference_local_windows.sh` verbatim into a scratch script with
+  `sleap-track` removed, so it is the script's own walk, not a reimplementation of it.
+  545 also matches §10's independent count.
+- **`push --dry-run` = the old plan, exactly.** 296 files on both sides, 0 only-in-old,
+  0 only-in-new. Every destination is under the resolved destination root, and every
+  destination mirrors its source's relative path.
+- Both baselines live in the session scratch directory, not committed: they are
+  measurements of a tree, not fixtures of a computation.
+
+**Capture gotcha.** The first `push` baseline read 293, not 296. `Out-File` wraps at the
+host's width, and three planned paths collided once truncated at ~93 characters.
+`ForEach-Object { $_.ToString() } | Out-File -Width 8192` fixes it. `Write-Host` also
+bypasses the pipeline entirely — the plan only reaches a file through the information
+stream (`6>&1`). A baseline that silently loses three rows is worse than no baseline.
+
+### `infer` runs `sleap-track` as a subprocess, and neither environment moved
+
+§7 left this open: `sleap-gpu` has torch but none of the three hypnose packages, and it
+is python 3.11.14 against a `>=3.12,<3.13` pin. Both options named there were rejected:
+
+- installing the hypnose packages into `sleap-gpu` needs the pin relaxed *and* would
+  downgrade its numpy 2.2.6, because `pyproject.toml` pins `numpy<2` — a working GPU
+  environment perturbed to gain a CLI;
+- installing torch + sleap-nn + lightning + kornia into `hypnose-sleap` is ~3 GB into
+  the exact environment every Phase 0–4 baseline was measured in.
+
+Taken instead: **the CLI runs in `hypnose-sleap` and calls `sleap-gpu`'s
+`sleap-track.exe` as a subprocess** — which is what the bash script did, so it is the
+faithful port rather than a workaround. Nothing was installed, no pin changed, and
+`--dry-run` runs in the baselined environment. Resolution order is
+`HYPNOSE_SLEAP_TRACK` > `configs/inference.local.yml` > `sleap-track` on `PATH`.
+
+Measured: the two environments agree on both variables that move predictions —
+sleap 1.5.2 and sleap-io 0.5.7 in each. They differ only in the torch stack, numpy
+(2.2.6 vs 1.26.4) and pandas (2.3.3 vs 3.0.5), none of which `sleap-track` reads.
+
+### The float32 no-op is preserved, structurally
+
+`:246` ran `python -c "import torch; torch.set_float32_matmul_precision('high')"` in a
+**separate process**, so it never reached `sleap-track` and never moved a prediction. It
+is not set in the port either. This machine is an RTX 4090 — Ada, so Ampere+ — where
+setting it would enable TF32 for float32 matmul and move every prediction. That is a
+re-baselining decision, not a port.
+
+Running `sleap-track` as a subprocess makes the no-op structural rather than a comment:
+there is no in-process torch for the setting to leak into. Its one working effect was
+the `&&` — abort the video when torch is unimportable — and that role now belongs to
+`sleap_track_executable`, which fails once, up front, naming the environment.
+
+### `DEFAULT_MODEL` was dead, and the port says so
+
+`:19` pointed into `sleap-models/sleap_v1.5.5_new_model/`, which does not exist, so the
+script only ever worked with an explicit `-m`. The port defaults to the `naive` role in
+`models.yml`, which resolves the same leaf name (`260305_143707.single_instance.n=340`)
+under `sleap_v1.5.5/models/`, which does exist — confirmed by the dry-run printing the
+resolved path. This fixes a dead default rather than reproducing it.
+
+### `push` had three defects the plan comparison cannot see
+
+The plan matched file for file while the behaviour did not. `qc/check_transfer.py`
+asserts the behaviour against a temp tree, so it runs anywhere:
+
+- **`-DryRun` wrote to ceph.** `:132-134` ran `New-Item -Force` on every destination
+  directory *before* the `if ($DryRun)` at `:136`. Measured: **143 empty directories, 0
+  files** created by a single dry run over the real tree. The port separates `plan_push`
+  (reads only) from `run_plan` (the only writer), so a dry run creates nothing —
+  asserted, not asserted-by-inspection.
+- **Quality reports reached nobody.** `:7` lists both tables in both extensions but not
+  `sleap_quality_sub-*.yml`, which Phase 3 added. `PUSH_PATTERNS` adds it. This does not
+  disturb the gate: there are currently 0 such files on `E:`, so both sides planned 296.
+  The first `extract` run after this lands them, and they will now be carried.
+- **Every copy was an overwrite.** `:140` passed `Copy-Item -Force` unconditionally. The
+  port refuses an existing destination unless `--force`, and `--dry-run` labels each row
+  `new` / `exists (same size)` / `exists (differs)` so the refusals are visible before
+  the transfer. On the real tree 3 of the 296 already exist on the server.
+
+Not ported, deliberately: `:124`'s `Write-Host "Skipped (" + ... + "):"` passes three
+arguments rather than concatenating, and `$matches` at `:80` shadows PowerShell's
+automatic `$Matches` used at `:101`/`:110` — surviving only because `-match` reassigns it
+first. Both are cosmetic in a file that no longer exists.
+
+### `infer` joins the shared driver; it needed three seams, not a fork
+
+`_run_sessions` now drives four verbs. The three seams, each expressed as data or one
+guard rather than as scattered conditionals:
+
+- `SELECT_FROM` — `infer` selects sessions from **rawdata** (videos live there); the
+  others from derivatives.
+- `layout.mirror_session` — a rawdata session's derivatives twin, composed from the two
+  directory names because on a first run it does not exist yet. This is what the old
+  `${DERIV_DIR}/${SUBJ_DIR_NAME}/${SESS_DIR_NAME}` relied on too. The `results.exists()`
+  skip is therefore not applied to `infer`, which creates it.
+- `_already_done` — gained an `infer` branch, and takes the session now, not just the
+  results directory. `infer` is done when **every** video has a `.slp`, not when one
+  does: a session that gained a video after its first run is not done. Skipping is also
+  per video inside `session_plan`, so a partial session costs only what is missing —
+  the old script re-ran every video every time.
+
+`require_local` is now called by `infer` too, via the shared driver — confirmed by
+`--profile server-windows infer` exiting 1 with the refusal. That closes the flag Phase 4
+left on the parser with nothing calling it.
+
+### `--rawdata-from` is a CLI-only change
+
+`combine_session(rawdata=...)` already existed (§12), so the verb only exposes it.
+`_roots` takes `args` rather than a profile name and layers `--rawdata-from` over
+`--profile`, redirecting the read end alone.
+
+### Five scripts retired, two of them already broken
+
+`run_sleap_inference_local_windows.sh` → `inference.py` + `infer`.
+`transfer_sleap_results.ps1` → `io/transfer.py` + `fetch` / `push`.
+
+The plan's premise that the other two "differ only in the conda hook and two defaults"
+held for `run_sleap_inference_local.sh` but **not** for `run_sleap_inference.sh`, which
+could not have run as written:
+
+- it passes `--batch-size 1` and `--peak-threshold 0.5`; `sleap-track` accepts
+  `--batch_size` and `--peak_threshold`, with underscores;
+- its `basename $(dirname ...)` chain is one level short, so `SUBJ_DIR` resolves to the
+  *session* directory and `SESS_DIR` to `behav` — it would write to
+  `derivatives/ses-NNN_date-YYYYMMDD/behav/saved_analysis_results`;
+- it writes `${BASENAME%.*}.predictions.slp` with no `<behav>__` prefix, so two videos
+  from different `behav/` folders collide.
+
+`submit_sleap_inference.sh` was not in the plan's delete list but sources
+`run_sleap_inference.sh` at `:8` and `:50`, so deleting one orphans the other. Both went:
+the HPC path loads `module load SLEAP/2024-08-14`, a different SLEAP entirely, where
+`hypnose-sleap` is not installed — repointing it would have produced a script that still
+could not work. Restoring the cluster path is fresh work, not a port, and both files
+remain in git history.
+
+`README.md` documented only the deleted scripts and was rewritten around the verbs.
+
+### Carried into Phase 6
+
+`annotate` has no `--allow-remote` and does not call `require_local`, so it will render
+an `.mp4` onto ceph if that is the active profile. It is the one unguarded writer left.

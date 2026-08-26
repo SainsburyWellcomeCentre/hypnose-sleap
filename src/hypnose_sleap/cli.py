@@ -1,6 +1,6 @@
 """The ``hypnose-sleap`` command line: one entry point for every verb.
 
-- ``fetch``    remote rawdata ``.avi``            -> local rawdata
+- ``fetch``    remote rawdata ``behav/`` tree     -> local rawdata
 - ``infer``    local ``.avi`` + a model role      -> ``.predictions.slp``
 - ``extract``  ``.slp``                           -> per-video parquet + quality ``.yml``
 - ``combine``  per-video parquet + harp streams   -> combined parquet
@@ -18,12 +18,15 @@ Subject and date selectors are shared by every verb and parsed by
 `hypnose_helpers.io.selectors`, so ``-s 57,58`` and ``-d 20260601-20260630`` mean the
 same thing everywhere.
 
-Handlers are imported inside their verb: `infer` needs sleap and torch, `combine` and
-`annotate` need hypnose_behavior, and ``--help`` must work without any of them.
+Handlers are imported inside their verb: `combine` and `annotate` need hypnose_behavior,
+`fetch` and `push` need the transfer module, and ``--help`` must work without any of
+them. `infer` needs none of it in-process -- it runs ``sleap-track`` as a subprocess out
+of the GPU environment, so the CLI itself stays installable where torch is not.
 
-``extract``, ``combine`` and ``run`` share one session driver -- the same selection,
-the same skip rules and the same success / failed / skipped tally that
-``process_sleap_sessions`` printed. They differ only in which steps they run.
+``infer``, ``extract``, ``combine`` and ``run`` share one session driver -- the same
+selection, the same skip rules and the same success / failed / skipped tally that
+``process_sleap_sessions`` printed. They differ in which steps they run, which tree they
+select sessions from (`SELECT_FROM`), and what counts as already done (`_already_done`).
 """
 from __future__ import annotations
 
@@ -35,6 +38,7 @@ VERBS = ("fetch", "infer", "extract", "combine", "run", "push", "annotate")
 
 # What each session verb runs, in order.
 STEPS = {
+    "infer": ("infer",),
     "extract": ("extract",),
     "combine": ("combine",),
     "run": ("extract", "combine"),
@@ -42,10 +46,15 @@ STEPS = {
 
 # The output whose presence means the verb has already run here, named for the skip line.
 DONE_LABEL = {
+    "infer": "predictions for every video",
     "extract": "tracking output",
     "combine": "combined tracking file",
     "run": "combined tracking file",
 }
+
+# Which tree a verb selects sessions from. `infer` reads videos out of rawdata; the
+# others read tables out of derivatives. Absent means derivatives.
+SELECT_FROM = {"infer": "rawdata"}
 
 
 def _add_session_selectors(parser: argparse.ArgumentParser) -> None:
@@ -67,6 +76,17 @@ def _add_allow_remote(parser: argparse.ArgumentParser) -> None:
     """For verbs that write bulk output, which belongs on local disk until `push`."""
     parser.add_argument("--allow-remote", action="store_true",
                         help="permit writing to a profile marked `remote: true`")
+
+
+def _add_rawdata_from(parser: argparse.ArgumentParser) -> None:
+    """Read harp streams from another profile than the one being written to.
+
+    For re-combining after local `rawdata` has been deleted: the streams are 1.3 % of a
+    session, so reading them off the server is cheap, but it is never the default --
+    the main loop stays off the network (`DECISIONS.md` §12).
+    """
+    parser.add_argument("--rawdata-from", dest="rawdata_from", default=None, metavar="PROFILE",
+                        help="read rawdata from this profile instead of the active one")
 
 
 def _add_extract_options(parser: argparse.ArgumentParser) -> None:
@@ -98,6 +118,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_dry_run(p)
     p.add_argument("--from", dest="source", default=None, help="override the remote end")
     p.add_argument("--to", dest="dest", default=None, help="override the local end")
+    p.add_argument("--force", action="store_true",
+                   help="re-copy files that already exist locally")
 
     p = sub.add_parser("infer", help="run sleap-track over a session's videos")
     _add_session_selectors(p)
@@ -107,6 +129,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="model role (naive | eeg_surgery | eeg_headstage) or an explicit path")
     p.add_argument("-bz", "--batch-size", type=int, default=None,
                    help="sleap-track batch size; defaults to configs/parameters.yml")
+    p.add_argument("--recompute", action="store_true",
+                   help="re-run videos that already have a .predictions.slp")
 
     p = sub.add_parser("extract", help=".slp -> per-video parquet + quality report")
     _add_session_selectors(p)
@@ -120,6 +144,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_session_selectors(p)
     _add_dry_run(p)
     _add_allow_remote(p)
+    _add_rawdata_from(p)
     p.add_argument("--recompute", action="store_true")
 
     p = sub.add_parser("run", help="extract then combine, in one process")
@@ -127,6 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_dry_run(p)
     _add_allow_remote(p)
     _add_extract_options(p)
+    _add_rawdata_from(p)
     p.add_argument("--recompute", action="store_true")
 
     p = sub.add_parser("push", help="copy local derivatives to the server")
@@ -177,30 +203,71 @@ def _subjects(sessions_layout, args) -> list:
     return [subjid for subjid, _ in sessions_layout.iter_subjects()]
 
 
-def _roots(profile) -> dict:
+def _roots(args) -> dict:
     """The rawdata and derivatives roots a verb works under.
 
     None means "the configured root", which is what every handler already defaults to.
-    ``--profile`` resolves a named profile instead, without making it the active one.
+    ``--profile`` resolves a named profile instead, without making it the active one;
+    ``--rawdata-from`` then redirects the read end alone.
     """
-    if profile is None:
-        return {"rawdata": None, "derivatives": None}
     from hypnose_sleap.io import paths
-    resolved = paths.resolve_profile(profile)
-    return {"rawdata": resolved["rawdata"], "derivatives": resolved["derivatives"]}
+
+    roots = {"rawdata": None, "derivatives": None}
+    if getattr(args, "profile", None) is not None:
+        resolved = paths.resolve_profile(args.profile)
+        roots = {"rawdata": resolved["rawdata"], "derivatives": resolved["derivatives"]}
+    if getattr(args, "rawdata_from", None):
+        roots["rawdata"] = paths.resolve_profile(args.rawdata_from)["rawdata"]
+    return roots
 
 
-def _already_done(results, steps):
+def _already_done(session, results, steps):
     """The output whose presence means this session has been processed, or None.
 
     The last step's output: with `combine` in the steps that is the combined table,
-    otherwise the per-video tables `extract` writes.
+    with `infer` a `.slp` for every video the session holds, otherwise the per-video
+    tables `extract` writes.
+
+    `infer` counts rather than merely finding one, because a session that gained a video
+    after its first run is not done -- and `infer` skips per video anyway, so a partial
+    session costs only the videos still missing.
     """
     from hypnose_sleap.io import layout
+    if "infer" in steps:
+        from hypnose_sleap.inference import slp_name
+        videos = layout.session_videos(session)
+        missing = [v for v in videos if not layout.find_outputs(results, slp_name(v))]
+        if videos and not missing:
+            return layout.find_outputs(results, "*.predictions.slp")[0]
+        return None
     if "combine" in steps:
         return layout.find_combined_table(results)
     tables = layout.find_tracking_tables(results)
     return tables[0] if tables else None
+
+
+def _dry_run_infer(tasks, args) -> int:
+    """`infer --dry-run`: every video and where its `.slp` would land.
+
+    Per video rather than per session, because that is the list the old bash script
+    walked and the list the Phase 5 gate compares against.
+    """
+    from hypnose_sleap import parameters
+    from hypnose_sleap.inference import session_plan
+
+    total = 0
+    print(f"\ninfer --dry-run: {len(tasks)} session(s):")
+    for session, results, _ in tasks:
+        for video, destination in session_plan(session, results, recompute=args.recompute):
+            print(f"  {video}\t{destination}")
+            total += 1
+    try:
+        model = parameters.resolve_model(args.model)
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        model = f"UNRESOLVED ({exc})"
+    print(f"\n  {total} video(s), model {model}, "
+          f"batch_size {parameters.resolve('batch_size', args.batch_size)}")
+    return 0
 
 
 # --- the session driver ----------------------------------------------------
@@ -213,6 +280,19 @@ def _process_one(session, results, slp_count, *, steps, args, roots) -> dict:
     messages = [f"\nSubject {subj:02d} Date {date_str} - Processing SLEAP Output:"]
 
     try:
+        if "infer" in steps:
+            from hypnose_sleap.inference import infer_session
+            inferred = infer_session(
+                session, results, model=args.model, batch_size=args.batch_size,
+                recompute=args.recompute,
+            )
+            messages.append(f"Inference: found {inferred['planned']} video(s) to process.")
+            messages.append(f"        Successfully tracked {len(inferred['outputs'])} videos.")
+            if inferred["failed"]:
+                names = ", ".join(v.name for v in inferred["failed"])
+                return {"status": "failed", "reason": f"{len(inferred['failed'])} video(s) failed",
+                        "messages": messages + [f"  Failed: {names}"]}
+
         if "extract" in steps:
             from hypnose_sleap.extract import extract_session
             extracted = extract_session(
@@ -256,8 +336,9 @@ def _run_sessions(args, verb: str) -> int:
 
     steps = STEPS[verb]
     paths.require_local(verb, allow_remote=args.allow_remote, profile=args.profile)
-    roots = _roots(args.profile)
-    sessions_layout = layout.layout_for(roots["derivatives"])
+    roots = _roots(args)
+    select_from = SELECT_FROM.get(verb, "derivatives")
+    sessions_layout = layout.layout_for(roots[select_from], name=select_from)
 
     if "extract" in steps and args.model is None:
         print("No --model given: the quality report records provenance as unknown.\n"
@@ -287,17 +368,30 @@ def _run_sessions(args, verb: str) -> int:
 
         for session in sessions:
             date_str = session.date
-            results = layout.results_dir(session)
+            # `infer` selects from rawdata but writes into derivatives, and on a first
+            # run that directory does not exist yet.
+            results = (layout.results_dir(layout.mirror_session(session, roots["derivatives"]))
+                       if select_from == "rawdata" else layout.results_dir(session))
 
-            if not results.exists():
+            if "infer" not in steps and not results.exists():
                 summary[subjid]["skipped"].append((date_str, "Results directory not found"))
                 print(f"Subject {subjid:02d} Date {date_str}: results directory missing, skipping")
                 continue
 
-            if _already_done(results, steps) is not None and not args.recompute:
+            if _already_done(session, results, steps) is not None and not args.recompute:
                 reason = f"Existing {DONE_LABEL[verb]}, skipping directory"
                 summary[subjid]["skipped"].append((date_str, reason))
                 print(f"Subject {subjid:02d} Date {date_str} - {reason} (recompute=False)")
+                continue
+
+            if "infer" in steps:
+                from hypnose_sleap.inference import session_plan
+                pending = session_plan(session, results, recompute=args.recompute)
+                if not pending:
+                    summary[subjid]["skipped"].append((date_str, "No videos found"))
+                    print(f"Subject {subjid:02d} Date {date_str}: no videos, skipping")
+                    continue
+                tasks.append((session, results, len(pending)))
                 continue
 
             slp_files = layout.find_outputs(results, "*.slp") if "extract" in steps else []
@@ -309,6 +403,8 @@ def _run_sessions(args, verb: str) -> int:
             tasks.append((session, results, len(slp_files)))
 
     if args.dry_run:
+        if "infer" in steps:
+            return _dry_run_infer(tasks, args)
         print(f"\n{verb} --dry-run: {len(tasks)} session(s) would run {' + '.join(steps)}:")
         for session, results, slp_count in tasks:
             print(f"  sub-{int(session.subjid):03d} date-{session.date}   {slp_count} .slp"
@@ -345,6 +441,10 @@ def main(argv=None) -> int:
 
     if args.verb in STEPS:
         return _run_sessions(args, args.verb)
+
+    if args.verb in ("fetch", "push"):
+        from hypnose_sleap.io.transfer import transfer
+        return transfer(args.verb, args)
 
     raise SystemExit(
         f"`{args.verb}` is not implemented yet -- hypnose-sleap is mid-restructure.\n"
