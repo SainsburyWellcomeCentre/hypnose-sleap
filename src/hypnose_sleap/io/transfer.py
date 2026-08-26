@@ -97,23 +97,25 @@ def endpoints(source: Optional[str], dest: Optional[str], *, direction: str) -> 
     return resolved
 
 
-def _sessions(root: Path, args_subject, ses, date) -> list:
+def _subjects(sessions_layout, subject) -> list:
+    """The subjects a selector names, or every one in the tree."""
+    if subject:
+        from hypnose_helpers.io.selectors import parse_subjects
+        return parse_subjects(subject)
+    return [subjid for subjid, _ in sessions_layout.iter_subjects()]
+
+
+def _sessions(root: Path, subject, selectors: dict) -> list:
     """Sessions under one root matching the shared selectors, over every subject.
 
     A missing subject directory is skipped rather than raised: a transfer names subjects
     that may exist at only one end, which is the normal case for `fetch`.
     """
     sessions_layout = layout.layout_for(root, name="rawdata")
-    if args_subject:
-        from hypnose_helpers.io.selectors import parse_subjects
-        subjids = parse_subjects(args_subject)
-    else:
-        subjids = [subjid for subjid, _ in sessions_layout.iter_subjects()]
-
     found = []
-    for subjid in subjids:
+    for subjid in _subjects(sessions_layout, subject):
         found.extend(
-            sessions_layout.find_sessions(subjid, ses=ses, date=date, missing_ok=True)
+            sessions_layout.find_sessions(subjid, missing_ok=True, **selectors)
         )
     return found
 
@@ -124,7 +126,7 @@ def _mirror(source_root: Path, dest_root: Path, source_file: Path) -> Path:
 
 
 def plan_fetch(source_root: Path, dest_root: Path, *,
-               subject=None, ses=None, date=None) -> list:
+               subject=None, selectors=None) -> list:
     """Every file `fetch` would copy, remote rawdata -> local rawdata.
 
     The whole ``behav/`` tree of each matching session, not the ``.avi`` alone. Reads
@@ -132,7 +134,7 @@ def plan_fetch(source_root: Path, dest_root: Path, *,
     """
     source_root, dest_root = Path(source_root), Path(dest_root)
     plan = []
-    for session in _sessions(source_root, subject, ses, date):
+    for session in _sessions(source_root, subject, selectors or {}):
         behav = Path(session.path) / FETCH_SUBDIR
         if not behav.is_dir():
             continue
@@ -144,7 +146,7 @@ def plan_fetch(source_root: Path, dest_root: Path, *,
 
 
 def plan_push(source_root: Path, dest_root: Path, *,
-              subject=None, ses=None, date=None, patterns=PUSH_PATTERNS) -> list:
+              subject=None, selectors=None, patterns=PUSH_PATTERNS) -> list:
     """Every file `push` would copy, local derivatives -> remote derivatives.
 
     Walks sessions through the layout rather than the whole tree, so a stray directory
@@ -154,15 +156,11 @@ def plan_push(source_root: Path, dest_root: Path, *,
     """
     source_root, dest_root = Path(source_root), Path(dest_root)
     sessions_layout = layout.layout_for(source_root, name="derivatives")
-    if subject:
-        from hypnose_helpers.io.selectors import parse_subjects
-        subjids = parse_subjects(subject)
-    else:
-        subjids = [subjid for subjid, _ in sessions_layout.iter_subjects()]
+    selectors = selectors or {}
 
     seen, plan = set(), []
-    for subjid in subjids:
-        for session in sessions_layout.find_sessions(subjid, ses=ses, date=date, missing_ok=True):
+    for subjid in _subjects(sessions_layout, subject):
+        for session in sessions_layout.find_sessions(subjid, missing_ok=True, **selectors):
             results = layout.results_dir(session)
             for pattern in patterns:
                 for item in layout.find_outputs(results, pattern):
@@ -240,9 +238,11 @@ def transfer(direction: str, args) -> int:
     if not Path(source_root).exists():
         raise SystemExit(f"source root not found: {source_root}")
 
+    from hypnose_sleap.cli import _selectors
+
     planner = plan_fetch if direction == "fetch" else plan_push
     plan = planner(source_root, dest_root,
-                   subject=args.subject, ses=args.ses, date=_join_dates(args.date))
+                   subject=args.subject, selectors=_selectors(args))
     check_destinations(plan, dest_root)
 
     if args.dry_run:
@@ -258,13 +258,6 @@ def transfer(direction: str, args) -> int:
     print(f"  from {source_root}\n  to   {dest_root}")
     run_plan(plan, force=getattr(args, "force", False), verb=direction)
     return 0
-
-
-def _join_dates(values):
-    """The date selector as one string, matching how the session verbs join it."""
-    if not values:
-        return None
-    return values[0] if len(values) == 1 else ",".join(str(v) for v in values)
 
 
 __all__ = [

@@ -14,9 +14,11 @@ The whole loop runs on local disk: ``fetch`` -> ``infer`` -> ``run`` -> ``push``
 
 Nothing here deletes anything. Reclaiming local disk is manual.
 
-Subject and date selectors are shared by every verb and parsed by
-`hypnose_helpers.io.selectors`, so ``-s 57,58`` and ``-d 20260601-20260630`` mean the
-same thing everywhere.
+Selectors are shared by every verb and parsed by `hypnose_helpers.io.selectors`, so
+``-s 57,58`` and ``-d 20260601-20260630`` mean the same thing everywhere. A session can
+be named three ways -- ``--date``, ``--ses`` (the number on the directory) or
+``--index`` (the subject's gap-free chronological rank) -- and each takes one value, a
+comma list, or an inclusive ``A-B`` range. Supplying several intersects them.
 
 Handlers are imported inside their verb: `combine` and `annotate` need hypnose_behavior,
 `fetch` and `push` need the transfer module, and ``--help`` must work without any of
@@ -58,13 +60,29 @@ SELECT_FROM = {"infer": "rawdata"}
 
 
 def _add_session_selectors(parser: argparse.ArgumentParser) -> None:
-    """The subject / date / session selectors every verb accepts."""
+    """The subject / date / session selectors every verb accepts.
+
+    `date`, `ses` and `index` are the three interchangeable keys
+    `hypnose_helpers.io.layout.filter_sessions` narrows on, and each takes a single
+    value, a comma list, or an inclusive ``A-B`` range in the same string -- a bare
+    date, `ses` or index has no hyphen, so the range form is never ambiguous. Nothing
+    here parses them; the string is handed over as given.
+
+    Supplying several intersects them: ``--ses 12-20 --index 1-9`` is the sessions that
+    are both.
+    """
     parser.add_argument("-s", "--subject", action="append", default=None,
                         help="subject(s): 57, 057, sub-057, or 57,58,59. Repeatable.")
     parser.add_argument("-d", "--date", action="append", default=None,
                         help="date(s): YYYYMMDD, a comma list, or YYYYMMDD-YYYYMMDD. Repeatable.")
-    parser.add_argument("--ses", default=None,
-                        help="session number(s): 12, 12,14, or 12-20.")
+    parser.add_argument("--ses", action="append", default=None,
+                        help="session number(s) as written on the directory: "
+                             "12, 12,14, or 12-20. Repeatable.")
+    parser.add_argument("--index", action="append", default=None,
+                        help="session index -- the subject's gap-free chronological rank, "
+                             "1..N: 3, 1,2,3, or 1-9. Ranked within the tree being read, "
+                             "so `fetch` counts the server's sessions and `push` the "
+                             "local ones. Repeatable.")
 
 
 def _add_dry_run(parser: argparse.ArgumentParser) -> None:
@@ -188,6 +206,19 @@ def _join(values) -> str | None:
     if not values:
         return None
     return values[0] if len(values) == 1 else ",".join(str(v) for v in values)
+
+
+def _selectors(args) -> dict:
+    """The narrowing arguments `find_sessions` takes, from the shared flags.
+
+    One place, so every verb narrows the same way and a new key reaches all of them at
+    once. `None` means "do not filter on this", which is what the flags default to.
+    """
+    return {
+        "ses": _join(args.ses),
+        "date": _join(args.date),
+        "index": _join(args.index),
+    }
 
 
 def _requested_dates(value):
@@ -331,7 +362,7 @@ def _run_annotate(args) -> int:
         if sessions_layout.subject_dir(subjid, missing_ok=True) is None:
             print(f"Subject {subjid:02d}: no subject directory found under {sessions_layout.root}")
             continue
-        for session in sessions_layout.find_sessions(subjid, ses=args.ses, date=_join(args.date)):
+        for session in sessions_layout.find_sessions(subjid, **_selectors(args)):
             results = layout.results_dir(session)
             if layout.find_combined_table(results) is None:
                 print(f"Subject {subjid:02d} Date {session.date}: no combined table, skipping")
@@ -451,7 +482,7 @@ def _run_sessions(args, verb: str) -> int:
             print(f"Subject {subjid:02d}: no subject directory found under {sessions_layout.root}")
             continue
 
-        sessions = sessions_layout.find_sessions(subjid, ses=args.ses, date=_join(args.date))
+        sessions = sessions_layout.find_sessions(subjid, **_selectors(args))
         found_dates = {s.date for s in sessions}
         for date_str in requested or []:
             if date_str not in found_dates:

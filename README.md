@@ -17,8 +17,20 @@ The whole loop runs on local disk: `fetch` -> `infer` -> `run` -> `push`. Only `
 and `push` touch the server, and the writing verbs refuse a profile marked
 `remote: true` without `--allow-remote`. Nothing deletes anything.
 
-Every verb takes the same selectors: `-s 57`, `-s 57,58`, `-d 20260717`,
-`-d 20260601-20260630`, `--ses 12-20`. Every verb takes `--dry-run`.
+Every verb takes the same selectors, and every verb takes `--dry-run`. A session can be
+named three interchangeable ways, each accepting one value, a comma list, or an
+inclusive `A-B` range:
+
+| flag | means | examples |
+| --- | --- | --- |
+| `-s` / `--subject` | subject | `57`, `057`, `sub-057`, `57,58` |
+| `-d` / `--date` | session date | `20260717`, `20260717,20260718`, `20260601-20260630` |
+| `--ses` | the number on the directory — stable, what you quote in a lab book | `12`, `12,14`, `12-20` |
+| `--index` | the subject's gap-free chronological rank, 1..N — comparable across animals recorded months apart | `3`, `1,2,3`, `1-9` |
+
+Supplying several intersects them: `--ses 12-20 --index 1-9` is the sessions that are
+both. `--index` is ranked within the tree being read, so `fetch` counts the server's
+sessions and `push` the local ones.
 
 ## Quick start
 
