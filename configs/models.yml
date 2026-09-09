@@ -13,7 +13,8 @@ default: naive
 
 models:
   naive:
-    path: 260305_143707.single_instance.n=340
+    path: 251205_174841.single_instance.n=150_260305_143707.single_instance.n=340_260826_162427.single_instance.n=550
+    previous: 260305_143707.single_instance.n=340
     skeleton: [center_head, neck, center, center_back, tail_base, left_ear, right_ear, tail_tip]
 
   eeg_surgery:
